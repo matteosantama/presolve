@@ -3,7 +3,10 @@
 //! Phase scheduling and cleanup. Cheap cleanup surrounds
 //! fast and medium exploration. A cycle ends after medium exploration.
 
-use crate::{core::model::Model, postsolve::tape::Certificate};
+use crate::{
+    core::{execution::Executor, model::Model},
+    postsolve::tape::Certificate,
+};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug)]
@@ -57,8 +60,8 @@ impl Model {
         Ok(())
     }
 
-    pub fn run(&mut self, limits: Limits) -> Result<Stats, Certificate> {
-        let result = self.run_phases(limits);
+    pub fn run(&mut self, limits: Limits, executor: &Executor) -> Result<Stats, Certificate> {
+        let result = self.run_phases(limits, executor);
         if result
             .as_ref()
             .is_ok_and(|stats| !stats.time_limit && self.rules.redundant_bounds)
@@ -74,7 +77,7 @@ impl Model {
         })
     }
 
-    fn run_phases(&mut self, limits: Limits) -> Result<Stats, Certificate> {
+    fn run_phases(&mut self, limits: Limits, executor: &Executor) -> Result<Stats, Certificate> {
         let start = Instant::now();
         let mut stats = Stats::default();
         let mut fast = true;
@@ -116,10 +119,10 @@ impl Model {
                 }
                 self.cleanup()?;
                 if self.rules.parallel_rows {
-                    stats.parallel_comparisons += self.parallel_rows()?;
+                    stats.parallel_comparisons += self.parallel_rows(executor)?;
                 }
                 if self.rules.parallel_columns {
-                    stats.parallel_comparisons += self.parallel_columns()?;
+                    stats.parallel_comparisons += self.parallel_columns(executor)?;
                 }
                 self.cleanup()?;
                 let after = self.work_size();

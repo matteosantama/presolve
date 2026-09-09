@@ -1,6 +1,7 @@
 //! Presolve entry point, working-model preparation, and result packing.
 use crate::{
     core::{
+        execution::Executor,
         model::{Model, RowDomain},
         schedule::Limits,
     },
@@ -16,14 +17,63 @@ use crate::{
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Consume a problem and return its unchanged data or an owned reduced model.
-/// No output matrices are built for the constraint system until the caller
-/// exports the reduced model. Input validity is the caller's responsibility.
-pub fn presolve(problem: impl Into<Problem>, settings: &Settings) -> PresolveResult {
-    let start = Instant::now();
-    presolve_owned(problem.into(), settings, start)
+/// Failure to create the requested execution resources.
+#[derive(Debug, thiserror::Error)]
+#[error("failed to initialize presolver threads: {0}")]
+pub struct InitError(#[from] rayon::ThreadPoolBuildError);
+
+/// Reusable presolve configuration and its dedicated execution resources.
+/// Each call owns a separate working model and recovery tape. Results do not
+/// borrow this object, and concurrent calls may share it through `&self`.
+#[derive(Debug)]
+pub struct Presolver {
+    settings: Settings,
+    executor: Executor,
 }
-fn presolve_owned(mut problem: Problem, settings: &Settings, start: Instant) -> PresolveResult {
+
+impl Presolver {
+    /// Configure execution once. A thread count of 1 creates no worker threads;
+    /// 0 lets Rayon choose automatically. Pool creation errors are returned.
+    pub fn new(settings: Settings) -> Result<Self, InitError> {
+        let executor = Executor::new(settings.threads)?;
+        Ok(Self { settings, executor })
+    }
+
+    /// Immutable settings used for every call.
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// Effective execution thread count, including automatic selection.
+    pub fn threads(&self) -> usize {
+        self.executor.threads()
+    }
+
+    /// Consume a problem, reusing this presolver's threads. The time budget and
+    /// elapsed statistic start fresh for each call and exclude `Self::new`.
+    /// No constraint output matrices are built until explicitly exported.
+    /// Input validity is the caller's responsibility.
+    pub fn presolve(&self, problem: impl Into<Problem>) -> PresolveResult {
+        let start = Instant::now();
+        presolve_owned(problem.into(), &self.settings, &self.executor, start)
+    }
+}
+
+/// Presolve one problem with temporary execution resources.
+/// Use `Presolver` to reuse the pool across calls. Initialization errors are
+/// distinct from optimization outcomes such as infeasibility or unboundedness.
+pub fn presolve(
+    problem: impl Into<Problem>,
+    settings: &Settings,
+) -> Result<PresolveResult, InitError> {
+    Ok(Presolver::new(settings.clone())?.presolve(problem))
+}
+fn presolve_owned(
+    mut problem: Problem,
+    settings: &Settings,
+    executor: &Executor,
+    start: Instant,
+) -> PresolveResult {
     let n = problem.c.len();
     let rows: Vec<_> = problem
         .rows
@@ -57,11 +107,14 @@ fn presolve_owned(mut problem: Problem, settings: &Settings, start: Instant) -> 
         parallel_comparisons: 0,
         quadratic_changed: false,
     };
-    let phases = model.run(Limits {
-        time: settings.time_limit.saturating_sub(start.elapsed()),
-        fill: settings.substitution_fill,
-        sparsify: settings.rules.sparsification,
-    });
+    let phases = model.run(
+        Limits {
+            time: settings.time_limit.saturating_sub(start.elapsed()),
+            fill: settings.substitution_fill,
+            sparsify: settings.rules.sparsification,
+        },
+        executor,
+    );
     stats.quadratic_changed = model.objective.p.revision != 0;
     let outcome = match phases {
         Err(certificate) => {

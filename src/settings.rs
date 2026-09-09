@@ -3,12 +3,19 @@ use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct Settings {
-    /// Soft budget including construction and export preparation. A transaction
-    /// already in progress finishes before the time limit is observed.
+    /// Soft budget per presolve call, including model construction and export
+    /// preparation, excluding Presolver initialization. A transaction already
+    /// in progress finishes before the time limit is observed.
     pub time_limit: Duration,
     pub rules: Rules,
     pub numerics: Numerics,
     pub substitution_fill: usize,
+    /// Maximum thread count for parallel fingerprinting and sorting: 1 is serial
+    /// (default), 0 lets Rayon select automatically (honoring RAYON_NUM_THREADS).
+    /// Presolver owns the pool, initialized once on construction; small scans
+    /// still run serially. Reductions and postsolve records are applied in
+    /// deterministic serial order. Pool creation failures return InitError.
+    pub threads: usize,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -17,6 +24,7 @@ impl Default for Settings {
             rules: Rules::default(),
             numerics: Numerics::default(),
             substitution_fill: 64,
+            threads: 1,
         }
     }
 }

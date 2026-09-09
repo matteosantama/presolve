@@ -101,7 +101,22 @@ fn render(old: &Run, new: &Run, color: bool) -> (String, bool) {
         old.metadata.name,
         new.metadata.name
     );
+    writeln!(
+        out,
+        "threads: {} → {} (0 = automatic)",
+        old.metadata.threads, new.metadata.threads
+    )
+    .unwrap();
     let mut issues = Vec::new();
+    writeln!(
+        out,
+        "pool mode: {:?} → {:?}",
+        old.metadata.pool_mode, new.metadata.pool_mode
+    )
+    .unwrap();
+    if old.metadata.kind == Kind::Time && old.metadata.pool_mode != new.metadata.pool_mode {
+        issues.push("pool modes differ; compare cold and reused timings separately".into());
+    }
     if !old.complete {
         issues.push(format!("{} is incomplete", old.metadata.name));
     }
@@ -364,6 +379,8 @@ mod tests {
                 created_unix_seconds: 0,
                 machine: "test".into(),
                 settings: "same".into(),
+                threads: 1,
+                pool_mode: crate::PoolMode::Cold,
             },
             cases: BTreeMap::from([(
                 "netlib/AFIRO/all".into(),
@@ -395,6 +412,28 @@ mod tests {
         assert!(text.contains("-50.00%"));
         assert!(text.contains("20.0ns [12.0ns–28.0ns] n=3"));
         assert!(!text.contains('\x1b'));
+    }
+
+    #[test]
+    fn thread_counts_can_differ_but_algorithm_settings_must_match() {
+        let a = run(Kind::Time, &[20]);
+        let mut b = run(Kind::Time, &[10]);
+        b.metadata.threads = 4;
+        let (text, invalid) = render(&a, &b, false);
+        assert!(!invalid);
+        assert!(text.contains("threads: 1 → 4"));
+        b.metadata.settings = "different numerics".into();
+        assert!(render(&a, &b, false).1);
+    }
+
+    #[test]
+    fn cold_and_reused_timings_are_not_combined() {
+        let a = run(Kind::Time, &[20]);
+        let mut b = run(Kind::Time, &[10]);
+        b.metadata.pool_mode = crate::PoolMode::Reused;
+        let (text, invalid) = render(&a, &b, false);
+        assert!(invalid);
+        assert!(text.contains("pool modes differ"));
     }
 
     #[test]

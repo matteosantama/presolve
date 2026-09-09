@@ -4,10 +4,19 @@
 //! propose groups; sparse comparisons establish proportionality before edits.
 
 use crate::{
-    core::model::{Model, RowDomain},
+    core::{
+        execution::Executor,
+        model::{Model, RowDomain},
+    },
     postsolve::tape::{Certificate, Point, Recovery, Side},
     problem::Bounds,
 };
+
+// Avoid scheduling small scans. Work estimates count constraint entries and,
+// for columns, full symmetric Hessian entries. These are initial cutoffs, not
+// guarantees of a speedup on every matrix or machine.
+const MIN_PARALLEL_ITEMS: usize = 1024;
+const MIN_PARALLEL_NONZEROS: usize = 32 * 1024;
 
 /// djb2 support hash and rounded, sign-normalized coefficient hash.
 /// Division by the maximum avoids overflow from forming its reciprocal first.
@@ -51,8 +60,17 @@ fn proportional(
     Some((ratio, exact))
 }
 
-fn bins<K: Ord>(mut entries: Vec<(K, usize)>) -> Vec<Vec<usize>> {
-    entries.sort_unstable();
+fn candidate_groups<K: Ord + Send>(
+    count: usize,
+    nonzeros: usize,
+    executor: &Executor,
+    key: impl Fn(usize) -> Option<K> + Sync,
+) -> Vec<Vec<usize>> {
+    let enough_work = count >= MIN_PARALLEL_ITEMS && nonzeros >= MIN_PARALLEL_NONZEROS;
+    let entry = |i| key(i).map(|key| (key, i));
+    // The index is a unique tiebreaker, making group and member order identical
+    // regardless of worker scheduling or sorting algorithm.
+    let entries = executor.filter_map_sorted(count, enough_work, entry);
     let mut out = Vec::new();
     let mut start = 0;
     while start < entries.len() {
@@ -69,15 +87,11 @@ fn bins<K: Ord>(mut entries: Vec<(K, usize)>) -> Vec<Vec<usize>> {
 }
 
 impl Model {
-    pub fn parallel_rows(&mut self) -> Result<usize, Certificate> {
-        let groups = bins(
-            (0..self.rows.len())
-                .filter(|&i| {
-                    matches!(self.rows[i], RowDomain::Linear(_)) && self.a.row(i).len() > 1
-                })
-                .map(|i| (fingerprint(self.a.row(i).iter()), i))
-                .collect(),
-        );
+    pub fn parallel_rows(&mut self, executor: &Executor) -> Result<usize, Certificate> {
+        let groups = candidate_groups(self.rows.len(), self.a.nnz(), executor, |i| {
+            (matches!(self.rows[i], RowDomain::Linear(_)) && self.a.row(i).len() > 1)
+                .then(|| fingerprint(self.a.row(i).iter()))
+        });
         let mut comparisons = 0;
         for group in groups {
             let base = group[0];
@@ -143,21 +157,20 @@ impl Model {
         Ok(comparisons)
     }
 
-    pub fn parallel_columns(&mut self) -> Result<usize, Certificate> {
-        let groups = bins(
-            (0..self.bounds.len())
-                .filter(|&j| self.alive[j] && !self.a.column(j).is_empty())
-                .map(|j| {
+    pub fn parallel_columns(&mut self, executor: &Executor) -> Result<usize, Certificate> {
+        let groups = candidate_groups(
+            self.bounds.len(),
+            self.a.nnz().saturating_add(self.objective.p.nnz()),
+            executor,
+            |j| {
+                (self.alive[j] && !self.a.column(j).is_empty()).then(|| {
                     let p = self.objective.p.column(j);
                     (
-                        (
-                            fingerprint(self.a.column(j).iter()),
-                            (!p.is_empty()).then(|| fingerprint(p.iter().copied())),
-                        ),
-                        j,
+                        fingerprint(self.a.column(j).iter()),
+                        (!p.is_empty()).then(|| fingerprint(p.iter().copied())),
                     )
                 })
-                .collect(),
+            },
         );
         let mut comparisons = 0;
         for group in groups {
@@ -218,5 +231,30 @@ impl Model {
             }
         }
         Ok(comparisons)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovery_uses_requested_threads_and_preserves_filtered_group_order() {
+        let key = |i: usize| (i % 5 != 0).then_some(i % 17);
+        let executor = Executor::new(3).unwrap();
+        let serial = candidate_groups(2048, MIN_PARALLEL_NONZEROS, &Executor::Serial, key);
+        let parallel = candidate_groups(2048, MIN_PARALLEL_NONZEROS, &executor, |i| {
+            assert_eq!(rayon::current_num_threads(), 3);
+            key(i)
+        });
+        assert_eq!(serial, parallel);
+
+        // Both the slot and work thresholds must be met before using a pool.
+        for (count, work) in [(1023, MIN_PARALLEL_NONZEROS), (2048, 32767)] {
+            candidate_groups(count, work, &executor, |i| {
+                assert!(rayon::current_thread_index().is_none());
+                key(i)
+            });
+        }
     }
 }

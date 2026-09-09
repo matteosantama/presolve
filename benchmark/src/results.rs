@@ -1,4 +1,4 @@
-use crate::{Kind, Result};
+use crate::{Kind, PoolMode, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -14,6 +14,14 @@ pub struct Metadata {
     pub created_unix_seconds: u64,
     pub machine: String,
     pub settings: String,
+    #[serde(default = "serial_threads", alias = "workers")]
+    pub threads: usize,
+    #[serde(default)]
+    pub pool_mode: PoolMode,
+}
+
+fn serial_threads() -> usize {
+    1
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +212,8 @@ mod tests {
             created_unix_seconds: 0,
             machine: "test".into(),
             settings: "test".into(),
+            threads: 1,
+            pool_mode: PoolMode::Cold,
         };
         let mut writer = RunWriter::create(&root, metadata()).unwrap();
         assert!(RunWriter::create(&root, metadata()).is_err());

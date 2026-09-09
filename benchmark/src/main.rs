@@ -16,6 +16,16 @@ enum Kind {
     Size,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PoolMode {
+    /// Include Presolver construction in each measurement.
+    #[default]
+    Cold,
+    /// Reuse a Presolver after an untimed call on the same problem.
+    Reused,
+}
+
 impl Kind {
     fn as_str(self) -> &'static str {
         match self {
@@ -52,9 +62,16 @@ enum Command {
         name_1: String,
         name_2: String,
     },
-    /// Execute a single first-call timing trial; used by the parent process.
+    /// Execute a single timing trial; used by the parent process.
     #[command(hide = true)]
-    Worker { path: PathBuf, rule: String },
+    Worker {
+        path: PathBuf,
+        rule: String,
+        #[arg(long, default_value_t = 1)]
+        threads: usize,
+        #[arg(long, value_enum, default_value_t = PoolMode::Cold)]
+        pool_mode: PoolMode,
+    },
 }
 
 #[derive(Subcommand)]
@@ -84,6 +101,12 @@ struct Selection {
     /// Exact rule name (sparsification, singleton_rows, ...); 'all' is the full pipeline.
     #[arg(long)]
     rule: Option<String>,
+    /// Presolve threads: 1 is serial; 0 lets Rayon select automatically.
+    #[arg(long, default_value_t = 1)]
+    threads: usize,
+    /// Include pool setup, or measure a reused pool after an untimed warm-up.
+    #[arg(long, value_enum, default_value_t = PoolMode::Cold)]
+    pool_mode: PoolMode,
 }
 
 fn execute(cli: Cli) -> Result<()> {
@@ -114,13 +137,18 @@ fn execute(cli: Cli) -> Result<()> {
                 Ok(())
             }
         }
-        Command::Worker { path, rule } => {
+        Command::Worker {
+            path,
+            rule,
+            threads,
+            pool_mode,
+        } => {
             if cfg!(debug_assertions) {
                 return Err("worker requires a release build".into());
             }
             let input = data::read(&path)?;
-            let settings = run::settings(&rule)?;
-            let result = run::measure(input, &settings, true);
+            let settings = run::settings(&rule, threads)?;
+            let result = run::measure(input, &settings, true, pool_mode)?;
             serde_json::to_writer(std::io::stdout().lock(), &result)?;
             Ok(())
         }

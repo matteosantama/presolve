@@ -301,8 +301,9 @@ possible reduction. For this measure, Hessian off-diagonal entries count twice.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `time_limit` | 60 seconds | Soft budget including construction and export preparation; an in-progress transaction can finish before the limit is observed. |
+| `time_limit` | 60 seconds | Per-call soft budget including model construction and export preparation, excluding `Presolver` initialization; an in-progress transaction can finish before the limit is observed. |
 | `substitution_fill` | `64` | Maximum new constraint and Hessian coefficients per equality substitution, with a separate prohibition on net Hessian growth. |
+| `threads` | `1` | Thread count for fingerprinting and sorting: `1` is serial, `0` lets Rayon select automatically. |
 | `numerics.feasibility` | `1e-9` | Relative feasibility margin for separation checks; it does not round bounds or cone coordinates to zero. |
 | `numerics.parallel` | `1e-12` | Relative coefficient tolerance for parallel candidates; operations requiring exact relations still enforce them. |
 | `numerics.huge_bound` | `1e7` | Propagation skips candidate bounds with absolute value at least this large. |
@@ -330,10 +331,72 @@ let settings = Settings {
 };
 ```
 
+### Optional parallel execution
+
+```rust
+use presolve::{InitError, Presolver, Problem, Settings};
+
+fn process(problems: impl IntoIterator<Item = Problem>) -> Result<(), InitError> {
+    let presolver = Presolver::new(Settings {
+        threads: 4,
+        ..Settings::default()
+    })?;
+    for problem in problems {
+        let result = presolver.presolve(problem);
+        // Use result.outcome and result.stats here.
+    }
+    Ok(())
+}
+```
+
+The first parallel implementation computes row/column fingerprints and sorts
+candidate keys concurrently. Proportionality checks, reductions, cleanup, and
+postsolve record creation remain serial. Sorting uses original indices to break
+ties, preserving serial candidate and reduction order. Runs that stop on the
+wall-clock limit can still differ in how much work they complete.
+
+Set `threads` to `1` for serial execution (the default), to a larger number for
+that many worker threads, or to `0` for Rayon's automatic selection, which honors
+`RAYON_NUM_THREADS`. `Presolver::new` creates a dedicated pool and returns
+`InitError` if initialization fails. With `threads: 1`, it creates no pool.
+An internal executor selects ordinary serial iterators or work in the owned
+Rayon pool. There is no global pool cache, and Rayon's global pool is unaffected.
+
+The presolver retains its settings and pool across calls; `threads()` reports
+the effective thread count. Each call has its own working model and recovery
+tape, so calls may run concurrently through `&self`, and results can outlive the
+presolver. The time budget and elapsed statistic reset for each call and exclude
+pool initialization.
+
+Scans currently stay serial below 1,024 row/column slots or 32,768 estimated
+nonzeros, or when the resolved thread count is one. These initial thresholds
+limit scan overhead; pool initialization still happens in `Presolver::new`, even
+for small problems. Enabling the option does not guarantee a speedup. The scan
+estimates use constraint nonzeros for rows and constraint plus Hessian nonzeros
+for columns.
+
+The benchmark accepts `--threads N` and `--pool-mode cold|reused` for both time
+and size runs. For example, to compare repeated-call performance:
+
+```sh
+cargo run --release -p benchmark -- run time --name serial --problem QAP12 --rule all --trials 5 --pool-mode reused
+cargo run --release -p benchmark -- run time --name parallel-4 --problem QAP12 --rule all --trials 5 --threads 4 --pool-mode reused
+cargo run --release -p benchmark -- compare time serial parallel-4
+```
+
+Timing trials use fresh processes. The default `cold` mode includes presolver
+initialization. `reused` initializes the presolver and runs one untimed warm-up
+on the same problem before measuring, so it also benefits from warmed caches.
+Loading and destruction are outside timing in both modes. Timing comparisons
+require matching pool modes, which are recorded in result metadata.
+
 ## Results and postsolve
 
-`presolve(problem, &settings)` consumes the problem and returns an outcome plus
-size and execution statistics:
+`presolver.presolve(problem)` consumes the problem and returns an outcome plus
+size and execution statistics. The one-shot helper `presolve(problem, &settings)`
+creates temporary execution resources and returns `Result<PresolveResult,
+InitError>`; use `presolve(problem, &settings)?` to propagate initialization
+failures. These errors are separate from optimization outcomes:
 
 | Outcome | Meaning |
 | --- | --- |

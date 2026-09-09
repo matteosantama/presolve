@@ -8,6 +8,7 @@
 //! `P x + c = A^T y + z`, with positive multipliers on lower bounds.
 
 pub(crate) mod activity;
+pub(crate) mod execution;
 pub(crate) mod model;
 pub(crate) mod objective;
 pub(crate) mod queues;

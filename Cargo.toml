@@ -11,4 +11,5 @@ description = "Sparse presolve and postsolve for convex quadratic and conic opti
 license = "Apache-2.0"
 
 [dependencies]
+rayon = "1.12"
 thiserror = "2"

@@ -1,6 +1,7 @@
 use crate::results::{Case, Measurement, Metadata, RunWriter};
-use crate::{Kind, Result, Selection, data};
+use crate::{Kind, PoolMode, Result, Selection, data};
 use presolve::{
+    Presolver,
     problem::ProblemData,
     result::Outcome,
     settings::{Rules, Settings},
@@ -37,7 +38,7 @@ const RULES: [(&str, Rules); 15] = rules!(
     cones,
 );
 
-pub fn settings(rule: &str) -> Result<Settings> {
+pub fn settings(rule: &str, threads: usize) -> Result<Settings> {
     let rules = RULES
         .iter()
         .find(|(name, _)| *name == rule)
@@ -50,16 +51,35 @@ pub fn settings(rule: &str) -> Result<Settings> {
         .1;
     Ok(Settings {
         rules,
+        threads,
         ..Settings::default()
     })
 }
 
-pub fn measure(input: ProblemData, settings: &Settings, timed: bool) -> Measurement {
-    // Input is prepared before the timer. It is consumed once, without a clone,
-    // warm-up call, export, or destruction of the returned model inside timing.
+pub fn measure(
+    input: ProblemData,
+    settings: &Settings,
+    timed: bool,
+    mode: PoolMode,
+) -> Result<Measurement> {
+    let ready = if mode == PoolMode::Reused {
+        let presolver = Presolver::new(settings.clone())?;
+        if timed {
+            drop(presolver.presolve(input.clone()));
+        }
+        Some(presolver)
+    } else {
+        None
+    };
+    // Loading, warm-up, cloning, and destruction of both the returned model and
+    // executor stay outside timing. Cold mode includes Presolver construction.
     let input = black_box(input);
     let start = timed.then(Instant::now);
-    let result = presolve::presolve(input, black_box(settings));
+    let presolver = match ready {
+        Some(presolver) => presolver,
+        None => Presolver::new(black_box(settings).clone())?,
+    };
+    let result = presolver.presolve(input);
     let elapsed_ns = start.map(|start| start.elapsed().as_nanos().min(u64::MAX as u128) as u64);
     let outcome = match &result.outcome {
         Outcome::Unchanged(_) => "unchanged",
@@ -68,21 +88,30 @@ pub fn measure(input: ProblemData, settings: &Settings, timed: bool) -> Measurem
         Outcome::Infeasible(_) => "infeasible",
         Outcome::Unbounded(_) => "unbounded",
     };
-    Measurement {
+    Ok(Measurement {
         elapsed_ns,
         outcome: outcome.into(),
         before: result.stats.before.into(),
         after: result.stats.after.map(Into::into),
         time_limit_reached: result.stats.time_limit_reached,
-    }
+    })
 }
 
-fn trial(executable: &Path, path: &Path, rule: &str) -> Result<Measurement> {
-    let output = Command::new(executable)
-        .arg("worker")
-        .arg(path)
-        .arg(rule)
-        .output()?;
+fn trial(
+    executable: &Path,
+    path: &Path,
+    rule: &str,
+    threads: usize,
+    mode: PoolMode,
+) -> Result<Measurement> {
+    let mut command = Command::new(executable);
+    command.arg("worker").arg(path).arg(rule);
+    command.arg("--threads").arg(threads.to_string());
+    command.arg("--pool-mode").arg(match mode {
+        PoolMode::Cold => "cold",
+        PoolMode::Reused => "reused",
+    });
+    let output = command.output()?;
     if !output.status.success() {
         return Err(format!(
             "worker {}: {}",
@@ -106,7 +135,7 @@ fn fingerprint(path: &Path) -> Result<String> {
 
 pub fn run(root: &Path, kind: Kind, selection: Selection, trials: usize) -> Result<()> {
     if let Some(rule) = &selection.rule {
-        settings(rule)?;
+        settings(rule, selection.threads)?;
     }
     let rules: Vec<_> = RULES
         .iter()
@@ -143,6 +172,7 @@ pub fn run(root: &Path, kind: Kind, selection: Selection, trials: usize) -> Resu
         .filter(|out| out.status.success())
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
         .unwrap_or_default();
+    let config = settings("all", selection.threads)?;
     let metadata = Metadata {
         version: 1,
         name: selection.name,
@@ -150,7 +180,14 @@ pub fn run(root: &Path, kind: Kind, selection: Selection, trials: usize) -> Resu
         trials,
         created_unix_seconds: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
         machine: format!("{}/{}/{host}", std::env::consts::OS, std::env::consts::ARCH),
-        settings: format!("{:?}", settings("all")?),
+        // Execution width may differ in a valid scaling comparison. Keep it
+        // separate from the algorithm settings, which must still match.
+        settings: format!(
+            "time_limit: {:?}, rules: {:?}, numerics: {:?}, substitution_fill: {}",
+            config.time_limit, config.rules, config.numerics, config.substitution_fill
+        ),
+        threads: selection.threads,
+        pool_mode: selection.pool_mode,
     };
     let mut writer = RunWriter::create(root, metadata)?;
     let executable = std::env::current_exe()?;
@@ -176,9 +213,20 @@ pub fn run(root: &Path, kind: Kind, selection: Selection, trials: usize) -> Resu
             };
             for at in 0..trials {
                 let result = match &input {
-                    Some(Ok(input)) => Ok(measure(input.clone(), &settings(rule)?, false)),
+                    Some(Ok(input)) => measure(
+                        input.clone(),
+                        &settings(rule, selection.threads)?,
+                        false,
+                        selection.pool_mode,
+                    ),
                     Some(Err(e)) => Err(e.to_string().into()),
-                    None => trial(&executable, &path, rule),
+                    None => trial(
+                        &executable,
+                        &path,
+                        rule,
+                        selection.threads,
+                        selection.pool_mode,
+                    ),
                 };
                 match result {
                     Ok(measurement) => {
