@@ -1,0 +1,14 @@
+[workspace]
+members = ["benchmark"]
+resolver = "3"
+
+[package]
+name = "presolve"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.86"
+description = "Sparse presolve and postsolve for convex quadratic and conic optimization"
+license = "Apache-2.0"
+
+[dependencies]
+thiserror = "2"

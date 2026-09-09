@@ -1,0 +1,15 @@
+presolve
+Copyright (c) 2026 Matteo Santamaria
+
+This project is licensed under the Apache License, Version 2.0; see LICENSE.
+
+This library includes modified code derived from PSLP.
+Copyright 2025-2026 Daniel Cederberg
+
+Source: https://github.com/dance858/PSLP
+Revision: 32b67835dbc6b88aab62ba2f19dd18249e876cb9
+Licensed under the Apache License, Version 2.0; see LICENSE.
+
+The derived code has been modified for Rust, convex quadratic objectives,
+general convex cones, sparse storage, rule scheduling, and solution recovery.
+These notices apply to the derived portions of source files marked Apache-2.0.
