@@ -5,6 +5,7 @@ resolver = "3"
 [package]
 name = "presolve"
 version = "0.1.0"
+authors = ["Matteo Santamaria"]
 edition = "2024"
 rust-version = "1.89"
 description = "Sparse presolve and postsolve for convex quadratic and conic optimization"
