@@ -15,6 +15,7 @@ pub struct Settings {
     /// Allow substitutions to increase the total number of Hessian nonzeros.
     pub allow_hessian_growth: bool,
     pub equalities: EqualitySettings,
+    pub dependencies: DependencySettings,
     pub propagation: PropagationSettings,
     pub progress: Progress,
     pub sparsification: SparsificationSettings,
@@ -34,6 +35,7 @@ impl Default for Settings {
             substitution_fill: 64,
             allow_hessian_growth: false,
             equalities: EqualitySettings::default(),
+            dependencies: DependencySettings::default(),
             propagation: PropagationSettings::default(),
             progress: Progress::default(),
             sparsification: SparsificationSettings::default(),
@@ -54,6 +56,10 @@ impl Settings {
             time_limit,
             substitution_fill: usize::MAX,
             allow_hessian_growth: true,
+            rules: Rules {
+                equality_dependencies: true,
+                ..Rules::default()
+            },
             equalities: EqualitySettings {
                 max_row_length: 16,
                 min_column_length: 1,
@@ -62,10 +68,13 @@ impl Settings {
                 require_linear_variable: false,
                 preserve_nonzeros: false,
                 work_limit: WorkLimit::Unlimited,
+                ..EqualitySettings::default()
             },
             propagation: PropagationSettings {
+                minimum_relative_gain: 0.005,
                 additional_rounds: usize::MAX,
                 work_limit: WorkLimit::Unlimited,
+                ..PropagationSettings::default()
             },
             progress: Progress::AnyChange,
             sparsification: SparsificationSettings {
@@ -88,6 +97,7 @@ pub struct Rules {
     pub singleton_columns: bool,
     pub doubleton_equalities: bool,
     pub short_equalities: bool,
+    pub equality_dependencies: bool,
     pub bound_propagation: bool,
     pub redundant_bounds: bool,
     pub parallel_rows: bool,
@@ -108,6 +118,7 @@ impl Rules {
             singleton_columns: false,
             doubleton_equalities: false,
             short_equalities: false,
+            equality_dependencies: false,
             bound_propagation: false,
             redundant_bounds: false,
             parallel_rows: false,
@@ -128,6 +139,7 @@ impl Default for Rules {
             singleton_columns: true,
             doubleton_equalities: true,
             short_equalities: true,
+            equality_dependencies: false,
             bound_propagation: true,
             redundant_bounds: true,
             parallel_rows: true,
@@ -157,9 +169,16 @@ impl Default for Numerics {
 
 /// Candidate restrictions for the `short_equalities` rule. The name is retained
 /// for compatibility; raising these limits also enables long equalities.
-/// The pivot must still have maximum coefficient magnitude in its row.
+/// Numerical pivot screening and bounded alternative attempts are independent of fill.
 #[derive(Clone, Copy, Debug)]
 pub struct EqualitySettings {
+    /// Minimum pivot magnitude divided by the row maximum. Values outside (0, 1]
+    /// use 1.0. The default forbids amplification; smaller values are experimental.
+    pub relative_pivot: f64,
+    /// Maximum transactional pivot attempts per equality per pass; zero disables them.
+    pub max_pivot_attempts: usize,
+    /// Rank candidates by estimated A and P work, after preferring free variables.
+    pub cost_aware: bool,
     pub max_row_length: usize,
     pub min_column_length: usize,
     pub max_column_length: usize,
@@ -173,6 +192,9 @@ pub struct EqualitySettings {
 impl Default for EqualitySettings {
     fn default() -> Self {
         Self {
+            relative_pivot: 1.0,
+            max_pivot_attempts: 1,
+            cost_aware: false,
             max_row_length: 8,
             min_column_length: 2,
             max_column_length: 8,
@@ -205,6 +227,13 @@ impl WorkLimit {
 
 #[derive(Clone, Copy, Debug)]
 pub struct PropagationSettings {
+    /// Accept a finite non-fixing bound change only above this fraction of the
+    /// old bound magnitude and the feasibility-scaled floor below.
+    /// Finite nonnegative values are valid; other values use the default 0.01.
+    pub minimum_relative_gain: f64,
+    /// Absolute gain floor = this factor times Numerics::feasibility.
+    /// Finite nonnegative values are valid; other values use the default 1e4.
+    pub minimum_gain_factor: f64,
     /// Extra rounds after the initial propagation pass. usize::MAX removes the cap.
     pub additional_rounds: usize,
     /// Default allowance: max(A nonzeros / 4, 256) across the extra rounds.
@@ -213,6 +242,8 @@ pub struct PropagationSettings {
 impl Default for PropagationSettings {
     fn default() -> Self {
         Self {
+            minimum_relative_gain: 0.01,
+            minimum_gain_factor: 1e4,
             additional_rounds: 3,
             work_limit: WorkLimit::Default,
         }
@@ -250,6 +281,26 @@ impl Default for SparsificationSettings {
     fn default() -> Self {
         Self {
             allow_auxiliary_variables: true,
+            work_limit: WorkLimit::Default,
+        }
+    }
+}
+
+/// Scratch-basis bounds for exact-arithmetic equality dependency detection.
+#[derive(Clone, Copy, Debug)]
+pub struct DependencySettings {
+    /// Maximum input and intermediate scratch row length.
+    pub max_row_length: usize,
+    /// Maximum independent rows retained in the scratch basis.
+    pub max_basis_rows: usize,
+    /// Default: four times the constraint nonzeros, once after ordinary phases.
+    pub work_limit: WorkLimit,
+}
+impl Default for DependencySettings {
+    fn default() -> Self {
+        Self {
+            max_row_length: 128,
+            max_basis_rows: 64,
             work_limit: WorkLimit::Default,
         }
     }

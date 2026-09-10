@@ -14,8 +14,28 @@ pub struct Size {
     /// Full symmetric storage: each off-diagonal pair counts twice.
     pub p_nonzeros: usize,
 }
+/// Short-equality candidate decisions. Counts include revisits across passes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EqualityStats {
+    pub rows_examined: usize,
+    /// Rows outside row limits, plus individual candidates outside column/domain limits.
+    pub structural_rejections: usize,
+    pub pivot_rejections: usize,
+    pub work_rejections: usize,
+    pub attempts: usize,
+    /// Sum of the five transactional rejection categories below.
+    pub rejected_updates: usize,
+    pub numerical_rejections: usize,
+    pub constraint_fill_rejections: usize,
+    pub quadratic_fill_rejections: usize,
+    pub hessian_growth_rejections: usize,
+    pub deadline_rejections: usize,
+    pub accepted: usize,
+    pub estimated_work: usize,
+}
 #[derive(Clone, Debug)]
 pub struct Stats {
+    pub equalities: EqualityStats,
     pub elapsed: Duration,
     pub time_limit_reached: bool,
     pub before: Size,

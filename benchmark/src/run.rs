@@ -21,7 +21,7 @@ macro_rules! rules {
     };
 }
 
-const RULES: [(&str, Rules); 15] = rules!(
+const RULES: [(&str, Rules); 16] = rules!(
     fixed_variables,
     empty_columns,
     empty_rows,
@@ -30,6 +30,7 @@ const RULES: [(&str, Rules); 15] = rules!(
     singleton_columns,
     doubleton_equalities,
     short_equalities,
+    equality_dependencies,
     bound_propagation,
     redundant_bounds,
     parallel_rows,
@@ -55,7 +56,10 @@ pub fn settings(rule: &str, threads: usize, tuning: &Tuning) -> Result<Settings>
             Settings::aggressive(std::time::Duration::from_secs(2))
         }
     };
-    settings.rules = rules;
+    // "all" runs the preset's enabled families; an explicit rule isolates it.
+    if rule != "all" {
+        settings.rules = rules;
+    }
     settings.threads = threads;
     if matches!(tuning.preset, Preset::Fill) {
         settings.substitution_fill = usize::MAX;
@@ -73,6 +77,21 @@ pub fn settings(rule: &str, threads: usize, tuning: &Tuning) -> Result<Settings>
     }
     if let Some(n) = tuning.equality_column_limit {
         settings.equalities.max_column_length = n;
+    }
+    if let Some(relative) = tuning.equality_pivot_relative {
+        settings.equalities.relative_pivot = relative;
+    }
+    if let Some(attempts) = tuning.equality_pivot_attempts {
+        settings.equalities.max_pivot_attempts = attempts;
+    }
+    if let Some(aware) = tuning.equality_cost_aware {
+        settings.equalities.cost_aware = aware;
+    }
+    if let Some(gain) = tuning.propagation_relative_gain {
+        settings.propagation.minimum_relative_gain = gain;
+    }
+    if let Some(factor) = tuning.propagation_gain_factor {
+        settings.propagation.minimum_gain_factor = factor;
     }
     if let Some(mode) = tuning.sparsification {
         settings.rules.sparsification &= !matches!(mode, SparsificationMode::Off);
@@ -131,7 +150,37 @@ pub fn measure(
         Outcome::Infeasible(_) => "infeasible",
         Outcome::Unbounded(_) => "unbounded",
     };
+    let decisions = result.stats.equalities;
     Ok(Measurement {
+        equality_decisions: Some(
+            [
+                ("rows_examined", decisions.rows_examined),
+                ("structural_rejections", decisions.structural_rejections),
+                ("pivot_rejections", decisions.pivot_rejections),
+                ("work_rejections", decisions.work_rejections),
+                ("attempts", decisions.attempts),
+                ("rejected_updates", decisions.rejected_updates),
+                ("numerical_rejections", decisions.numerical_rejections),
+                (
+                    "constraint_fill_rejections",
+                    decisions.constraint_fill_rejections,
+                ),
+                (
+                    "quadratic_fill_rejections",
+                    decisions.quadratic_fill_rejections,
+                ),
+                (
+                    "hessian_growth_rejections",
+                    decisions.hessian_growth_rejections,
+                ),
+                ("deadline_rejections", decisions.deadline_rejections),
+                ("accepted", decisions.accepted),
+                ("estimated_work", decisions.estimated_work),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v))
+            .collect(),
+        ),
         elapsed_ns,
         before_bound_sides,
         after_bound_sides,
@@ -159,6 +208,26 @@ fn trial(
     });
     command.arg("--preset").arg(tuning.preset.as_str());
     for (flag, value) in [
+        (
+            "--propagation-relative-gain",
+            tuning.propagation_relative_gain.map(|v| v.to_string()),
+        ),
+        (
+            "--propagation-gain-factor",
+            tuning.propagation_gain_factor.map(|v| v.to_string()),
+        ),
+        (
+            "--equality-pivot-relative",
+            tuning.equality_pivot_relative.map(|v| v.to_string()),
+        ),
+        (
+            "--equality-pivot-attempts",
+            tuning.equality_pivot_attempts.map(|v| v.to_string()),
+        ),
+        (
+            "--equality-cost-aware",
+            tuning.equality_cost_aware.map(|v| v.to_string()),
+        ),
         (
             "--time-limit-ms",
             tuning.time_limit_ms.map(|v| v.to_string()),

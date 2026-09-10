@@ -124,6 +124,17 @@ pub(crate) enum Rule {
         other_rows: Entries,
         retained: bool,
     },
+    DependentRow {
+        row: usize,
+        coefficients: Entries,
+    },
+    /// A_keep = ratio * A_removed. Transfer any multiplier still on a
+    /// redundant parallel row before discarding its warm-start coordinate.
+    MergedRow {
+        keep: usize,
+        removed: usize,
+        ratio: f64,
+    },
     DeletedRow(usize),
     TightenedBound {
         column: usize,
@@ -296,7 +307,12 @@ impl RecoveryTape {
                                 / a;
                     }
                 }
-                Rule::DeletedRow(row) => {
+                Rule::DependentRow { row, .. } => {
+                    if mode.dual() {
+                        point.y[*row] = 0.0;
+                    }
+                }
+                Rule::DeletedRow(row) | Rule::MergedRow { removed: row, .. } => {
                     if mode.dual() {
                         point.y[*row] = 0.0;
                     }
@@ -465,7 +481,21 @@ impl RecoveryTape {
                         point.y[equation.row] = 0.0;
                     }
                 }
+                Rule::DependentRow { row, coefficients } => {
+                    for &(j, a) in coefficients {
+                        point.y[j] += a * point.y[*row];
+                    }
+                    point.y[*row] = 0.0;
+                }
                 Rule::DeletedRow(row) => point.y[*row] = 0.0,
+                Rule::MergedRow {
+                    keep,
+                    removed,
+                    ratio,
+                } => {
+                    point.y[*keep] += point.y[*removed] / ratio;
+                    point.y[*removed] = 0.;
+                }
                 Rule::TightenedRow {
                     row,
                     source,

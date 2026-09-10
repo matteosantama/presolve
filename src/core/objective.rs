@@ -4,7 +4,16 @@
 //! Every affine substitution applies P' = T^T P T, c' = T^T(c+P d).
 
 use crate::matrix::sparse::{Entries, SparseMatrix};
-use std::{collections::BTreeMap, time::Instant};
+use std::time::Instant;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SubstitutionFailure {
+    Numerical,
+    ConstraintFill,
+    QuadraticFill,
+    HessianGrowth,
+    Deadline,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct Gradient {
@@ -21,10 +30,37 @@ impl Gradient {
 }
 
 #[derive(Clone, Debug)]
+struct Affected {
+    column: usize,
+    curvature: f64,
+    slope: f64,
+    has_slope: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Scratch {
+    affected: Vec<Affected>,
+    curvature_indices: Vec<usize>,
+    slope_indices: Vec<usize>,
+    linear: Entries,
+    quadratic: Vec<(usize, usize, f64)>,
+}
+impl Scratch {
+    fn clear(&mut self) {
+        self.affected.clear();
+        self.curvature_indices.clear();
+        self.slope_indices.clear();
+        self.linear.clear();
+        self.quadratic.clear();
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct Objective {
     pub p: SparseMatrix,
     pub c: Vec<f64>,
     pub constant: f64,
+    pub scratch: Scratch,
 }
 
 impl Objective {
@@ -54,101 +90,159 @@ impl Objective {
         allow_growth: bool,
         deadline: Option<Instant>,
     ) -> Option<Gradient> {
+        self.try_substitute(k, offset, slopes, max_fill, allow_growth, deadline)
+            .ok()
+    }
+
+    pub fn try_substitute(
+        &mut self,
+        k: usize,
+        offset: f64,
+        slopes: &[(usize, f64)],
+        max_fill: usize,
+        allow_growth: bool,
+        deadline: Option<Instant>,
+    ) -> Result<Gradient, SubstitutionFailure> {
         assert!(slopes.iter().all(|&(j, _)| j != k));
-        let gradient = self.gradient(k);
-        let diagonal = self.p.get(k, k);
-        let constant = self.constant + self.c[k] * offset + 0.5 * diagonal * offset * offset;
-        if !constant.is_finite() || !offset.is_finite() {
-            return None;
-        }
-        let mut linear = BTreeMap::new();
-        let mut quadratic = BTreeMap::new();
-        let slopes_by_column: BTreeMap<_, _> = slopes.iter().copied().collect();
-        let mut added = 0;
-        let mut removed = 2 * self.p.column(k).len() - usize::from(diagonal != 0.0);
-        let mut visits = 0usize;
-        let mut update_quadratic = |j: usize, l: usize, check_fill_only: bool| -> Option<()> {
-            visits += 1;
-            if visits % 1024 == 0 && deadline.is_some_and(|d| Instant::now() >= d) {
-                return None;
+        debug_assert!(slopes.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        let mut scratch = std::mem::take(&mut self.scratch);
+        scratch.clear();
+        let result = (|| {
+            let gradient = self.gradient(k);
+            let diagonal = self.p.get(k, k);
+            let constant = self.constant + self.c[k] * offset + 0.5 * diagonal * offset * offset;
+            if !constant.is_finite() || !offset.is_finite() {
+                return Err(SubstitutionFailure::Numerical);
             }
-            let (j, l) = (j.min(l), j.max(l));
-            let old = self.p.get(j, l);
-            // Check missing coefficients before allocating updates to existing
-            // entries, so excessive fill can be rejected before building a dense update.
-            if check_fill_only && old != 0.0 {
-                return Some(());
-            }
-            if quadratic.contains_key(&(j, l)) {
-                return Some(());
-            }
-            let vj = slopes_by_column.get(&j).copied().unwrap_or(0.0);
-            let vl = slopes_by_column.get(&l).copied().unwrap_or(0.0);
-            let value = old + self.p.get(j, k) * vl + vj * self.p.get(k, l) + diagonal * vj * vl;
-            if !value.is_finite() {
-                return None;
-            }
-            let count = if j == l { 1 } else { 2 };
-            if old == 0.0 && value != 0.0 {
-                added += count;
-                if added > max_fill {
-                    return None;
+            let curved = !self.p.column(k).is_empty();
+            // Merge the two sorted supports once. The LP path stages only its
+            // linear coefficients, without constructing quadratic scratch data.
+            let mut p = self
+                .p
+                .column(k)
+                .iter()
+                .copied()
+                .filter(|&(j, _)| j != k)
+                .peekable();
+            let mut slopes = slopes.iter().copied().peekable();
+            while p.peek().is_some() || slopes.peek().is_some() {
+                let pj = p.peek().map_or(usize::MAX, |e| e.0);
+                let sj = slopes.peek().map_or(usize::MAX, |e| e.0);
+                let j = pj.min(sj);
+                let curvature = if pj == j { p.next().unwrap().1 } else { 0.0 };
+                let slope = if sj == j {
+                    slopes.next().unwrap().1
+                } else {
+                    0.0
+                };
+                let mut linear = self.c[j];
+                if pj == j {
+                    linear += offset * curvature;
                 }
-            } else if old != 0.0 && value == 0.0 {
-                removed += count;
-            }
-            quadratic.insert((j, l), value);
-            if j != l {
-                quadratic.insert((l, j), value);
-            }
-            Some(())
-        };
-        for &(j, pjk) in self.p.column(k) {
-            if j == k {
-                continue;
-            }
-            *linear.entry(j).or_insert(self.c[j]) += offset * pjk;
-        }
-        for &(j, vj) in slopes {
-            *linear.entry(j).or_insert(self.c[j]) += (self.c[k] + diagonal * offset) * vj;
-        }
-        for check_fill_only in [true, false] {
-            for &(j, _) in self.p.column(k) {
-                if j != k {
-                    for &(l, _) in slopes {
-                        update_quadratic(j, l, check_fill_only)?;
+                if sj == j {
+                    linear += (self.c[k] + diagonal * offset) * slope;
+                }
+                scratch.linear.push((j, linear));
+                if curved {
+                    let at = scratch.affected.len();
+                    scratch.affected.push(Affected {
+                        column: j,
+                        curvature,
+                        slope,
+                        has_slope: sj == j,
+                    });
+                    if pj == j {
+                        scratch.curvature_indices.push(at);
+                    }
+                    if sj == j {
+                        scratch.slope_indices.push(at);
                     }
                 }
             }
-            if diagonal != 0.0 {
-                for &(j, _) in slopes {
-                    for &(l, _) in slopes {
-                        update_quadratic(j, l, check_fill_only)?;
+            let mut added = 0;
+            let mut removed = 2 * self.p.column(k).len() - usize::from(diagonal != 0.0);
+            let mut visits = 0usize;
+            let mut update =
+                |j: usize, l: usize, missing: bool| -> Result<(), SubstitutionFailure> {
+                    visits += 1;
+                    if visits % 1024 == 0 && deadline.is_some_and(|d| Instant::now() >= d) {
+                        return Err(SubstitutionFailure::Deadline);
+                    }
+                    let a = &scratch.affected[j];
+                    let b = &scratch.affected[l];
+                    let old = self.p.get(a.column, b.column);
+                    // Each unordered candidate occurs once in each pass. Reject
+                    // excessive fill before staging updates to existing positions.
+                    if (old == 0.0) != missing {
+                        return Ok(());
+                    }
+                    let value = old
+                        + a.curvature * b.slope
+                        + a.slope * b.curvature
+                        + diagonal * a.slope * b.slope;
+                    if !value.is_finite() {
+                        return Err(SubstitutionFailure::Numerical);
+                    }
+                    let count = if j == l { 1 } else { 2 };
+                    if old == 0.0 && value != 0.0 {
+                        added += count;
+                        if added > max_fill {
+                            return Err(SubstitutionFailure::QuadraticFill);
+                        }
+                    } else if old != 0.0 && value == 0.0 {
+                        removed += count;
+                    }
+                    if value != old {
+                        scratch.quadratic.push((a.column, b.column, value));
+                    }
+                    Ok(())
+                };
+            for missing in [true, false] {
+                for (j, a) in scratch.affected.iter().enumerate() {
+                    let use_slopes = a.curvature != 0.0 || (diagonal != 0.0 && a.has_slope);
+                    let use_curvature = a.has_slope;
+                    if use_slopes && use_curvature {
+                        for l in j..scratch.affected.len() {
+                            update(j, l, missing)?;
+                        }
+                    } else {
+                        let indices = if use_slopes {
+                            &scratch.slope_indices
+                        } else if use_curvature {
+                            &scratch.curvature_indices
+                        } else {
+                            continue;
+                        };
+                        let start = indices.partition_point(|&l| l < j);
+                        for &l in &indices[start..] {
+                            update(j, l, missing)?;
+                        }
                     }
                 }
             }
-        }
-        if !allow_growth && added > removed {
-            return None;
-        }
-        if linear
-            .values()
-            .chain(quadratic.values())
-            .any(|v| !v.is_finite())
-        {
-            return None;
-        }
-        self.p.remove_row(k);
-        self.p.remove_column(k);
-        self.c[k] = 0.0;
-        for (j, c) in linear {
-            self.c[j] = c;
-        }
-        for ((j, l), p) in quadratic {
-            self.p.set(j, l, p);
-        }
-        self.constant = constant;
-        Some(gradient)
+            if !allow_growth && added > removed {
+                return Err(SubstitutionFailure::HessianGrowth);
+            }
+            if scratch.linear.iter().any(|e| !e.1.is_finite()) {
+                return Err(SubstitutionFailure::Numerical);
+            }
+            self.p.remove_row(k);
+            self.p.remove_column(k);
+            self.c[k] = 0.0;
+            for &(j, c) in &scratch.linear {
+                self.c[j] = c;
+            }
+            for &(j, l, p) in &scratch.quadratic {
+                self.p.set(j, l, p);
+                if j != l {
+                    self.p.set(l, j, p);
+                }
+            }
+            self.constant = constant;
+            Ok(gradient)
+        })();
+        self.scratch = scratch;
+        result
     }
 
     /// Parallel-column aggregation is exact for a QP only when its objective
@@ -191,6 +285,90 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::needless_range_loop)] // Dense reference algebra uses explicit matrix indices.
+    fn packed_updates_match_dense_affine_transformations_and_clear_failed_scratch() {
+        let n = 6;
+        for seed in 0..24 {
+            let k = seed % n;
+            let dense: Vec<f64> = (0..n)
+                .flat_map(|i| {
+                    (0..n).map(move |j| {
+                        (0..3)
+                            .map(|r| {
+                                (((i + r + seed) % 5) as f64 - 2.)
+                                    * (((j + r + seed) % 5) as f64 - 2.)
+                            })
+                            .sum()
+                    })
+                })
+                .collect();
+            let mut objective = Objective {
+                p: SparseMatrix::from_matrix(
+                    &crate::matrix::test_matrix(n, n, dense.clone()).unwrap(),
+                ),
+                c: (0..n).map(|j| j as f64 - 2.).collect(),
+                constant: 3.,
+                scratch: Default::default(),
+            };
+            let original = objective.clone();
+            let slopes: Vec<_> = (0..n)
+                .filter(|&j| j != k && (j + seed) % 3 != 0)
+                .map(|j| (j, ((j + seed) % 5) as f64 / 2. - 1.))
+                .collect();
+            let mut transform = vec![vec![0.; n]; n];
+            for j in 0..n {
+                if j != k {
+                    transform[j][j] = 1.;
+                }
+            }
+            for &(j, a) in &slopes {
+                transform[k][j] = a;
+            }
+            objective
+                .try_substitute(k, 2., &slopes, usize::MAX, true, None)
+                .unwrap();
+            for j in 0..n {
+                let c: f64 = (0..n)
+                    .map(|a| transform[a][j] * (original.c[a] + 2. * dense[a * n + k]))
+                    .sum();
+                assert_eq!(objective.c[j], c);
+                for l in 0..n {
+                    let mut expected = 0.;
+                    for a in 0..n {
+                        for b in 0..n {
+                            expected += transform[a][j] * dense[a * n + b] * transform[b][l];
+                        }
+                    }
+                    assert_eq!(objective.p.get(j, l), expected);
+                }
+            }
+        }
+        let mut objective = Objective {
+            p: SparseMatrix::zeros(n, n),
+            c: vec![1.; n],
+            constant: 0.,
+            scratch: Default::default(),
+        };
+        objective.p.set(0, 0, 1.);
+        let slopes: Vec<_> = (1..n).map(|j| (j, 1.)).collect();
+        assert!(matches!(
+            objective.try_substitute(0, 2., &slopes, 0, true, None),
+            Err(SubstitutionFailure::QuadraticFill)
+        ));
+        assert_eq!(objective.p.nnz(), 1);
+        objective
+            .try_substitute(0, 2., &slopes, usize::MAX, true, None)
+            .unwrap();
+        for j in 1..n {
+            for l in 1..n {
+                assert_eq!(objective.p.get(j, l), 1.);
+            }
+        }
+        assert_eq!(objective.c[1..], [4.; 5]);
+        assert_eq!(objective.constant, 4.);
+    }
+
+    #[test]
     fn wide_substitution_skips_zero_quadratic_work_and_rejects_fill_before_constructing_it() {
         let n = 4097;
         let slopes: Vec<_> = (1..n).map(|j| (j, 1.0)).collect();
@@ -198,6 +376,7 @@ mod tests {
             p: SparseMatrix::zeros(n, n),
             c: vec![0.0; n],
             constant: 0.0,
+            scratch: Default::default(),
         };
         objective.c[0] = 2.0;
         assert!(
@@ -237,6 +416,7 @@ mod tests {
                 p: SparseMatrix::from_matrix(&crate::matrix::test_matrix(3, 3, entries).unwrap()),
                 c: vec![2.0, 3.0, 4.0],
                 constant: 5.0,
+                scratch: Default::default(),
             };
             let original = objective.clone();
             assert!(
@@ -262,6 +442,7 @@ mod tests {
             ),
             c: vec![2., 3., 4.],
             constant: 5.,
+            scratch: Default::default(),
         };
         let original = objective.clone();
         assert!(
@@ -281,6 +462,7 @@ mod tests {
             p: SparseMatrix::zeros(65, 65),
             c: vec![1.; 65],
             constant: 7.,
+            scratch: Default::default(),
         };
         wide.p.set(0, 0, 1.);
         let slopes: Vec<_> = (1..65).map(|j| (j, 1.)).collect();
@@ -314,6 +496,7 @@ mod tests {
                 p: SparseMatrix::from_matrix(&crate::matrix::test_matrix(3, 3, entries).unwrap()),
                 c: vec![2.0, 3.0, 4.0],
                 constant: 5.0,
+                scratch: Default::default(),
             };
             let original = objective.clone();
             assert!(
@@ -341,6 +524,7 @@ mod tests {
             p: SparseMatrix::zeros(4, 4),
             c: vec![0.0; 4],
             constant: 0.0,
+            scratch: Default::default(),
         };
         for i in 0..2 {
             for j in 0..2 {
@@ -374,6 +558,7 @@ mod tests {
             ),
             c: vec![2.0, 3.0, 4.0],
             constant: 5.0,
+            scratch: Default::default(),
         };
         let original = objective.clone();
         assert!(

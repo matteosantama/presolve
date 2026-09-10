@@ -248,6 +248,7 @@ impl Problem {
             ),
             c: std::mem::take(&mut self.c),
             constant: self.objective_constant,
+            scratch: Default::default(),
         }
     }
     pub(crate) fn restore_working_matrix(&mut self, matrix: LinkedMatrix) {

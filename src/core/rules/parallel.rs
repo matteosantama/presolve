@@ -8,7 +8,7 @@ use crate::{
         execution::Executor,
         model::{Model, RowDomain},
     },
-    postsolve::tape::{Certificate, Point, Recovery, Side},
+    postsolve::tape::{Certificate, Point, Recovery, Rule, Side},
     problem::Bounds,
 };
 
@@ -93,68 +93,119 @@ impl Model {
                 .then(|| fingerprint(self.a.row(i).iter()))
         });
         let mut comparisons = 0;
+        let mut unmatched = Vec::new();
         for group in groups {
             let base = group[0];
-            // Compare each hash-bin member to the first representative,
-            // avoiding an all-pairs search when the hash merely collides.
+            unmatched.clear();
+            // Preserve the usual linear-time path and its representative order.
             for &other in &group[1..] {
                 comparisons += 1;
-                let Some((ratio, exact)) =
-                    proportional(self.a.row(base), self.a.row(other), self.numerics.parallel)
-                else {
-                    continue;
-                };
-                let RowDomain::Linear(b) = self.rows[base] else {
-                    continue;
-                };
-                let RowDomain::Linear(c) = self.rows[other] else {
-                    continue;
-                };
-                let (cl, cu) = if ratio > 0.0 {
-                    (c.lower, c.upper)
-                } else {
-                    (c.upper, c.lower)
-                };
-                let lower = ratio * cl;
-                let upper = ratio * cu;
-                if (cl.is_finite() && !lower.is_finite()) || (cu.is_finite() && !upper.is_finite())
-                {
-                    continue;
+                if !self.merge_parallel_rows(base, other)? {
+                    unmatched.push((other, 0.0));
                 }
-                let intersection = Bounds {
-                    lower: b.lower.max(lower),
-                    upper: b.upper.min(upper),
-                };
-                if intersection.lower > intersection.upper {
-                    let gap = intersection.lower - intersection.upper;
-                    if !exact
-                        || gap
-                            <= self.numerics.feasibility
-                                * (1.0 + intersection.lower.abs().max(intersection.upper.abs()))
-                    {
-                        continue;
-                    }
-                    let mut point = Point::zeros(self.bounds.len(), self.rows.len());
-                    point.y[base] = if b.lower > upper { 1.0 } else { -1.0 };
-                    point.y[other] = -ratio * point.y[base];
-                    return Err(Certificate {
-                        mode: Recovery::PrimalInfeasibility,
-                        point,
-                    });
+            }
+            if unmatched.len() < 2 {
+                continue;
+            }
+            // A coarse fingerprint can contain several proportional classes.
+            // Canonical ordering brings their members together without an
+            // all-pairs search. Normalize once per row; avoid reciprocals that
+            // overflow for small coefficients. Only collision bins pay this cost.
+            for (i, scale) in &mut unmatched {
+                let row = self.a.row(*i);
+                *scale = row
+                    .iter()
+                    .map(|(_, a)| a.abs())
+                    .fold(0.0, f64::max)
+                    .copysign(row.iter().next().unwrap().1);
+            }
+            unmatched.sort_unstable_by(|&(i, a), &(j, b)| {
+                let left = self.a.row(i);
+                let right = self.a.row(j);
+                left.len()
+                    .cmp(&right.len())
+                    .then_with(|| {
+                        left.iter()
+                            .zip(right)
+                            .find_map(|((k, x), (l, y))| {
+                                let order = k.cmp(&l).then_with(|| (x / a).total_cmp(&(y / b)));
+                                (!order.is_eq()).then_some(order)
+                            })
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| i.cmp(&j))
+            });
+            let mut base = unmatched[0].0;
+            for &(other, _) in &unmatched[1..] {
+                comparisons += 1;
+                if !self.merge_parallel_rows(base, other)? {
+                    base = other;
                 }
-                if intersection.equality() && !b.equality() && !exact {
-                    continue;
-                }
-                if intersection.lower > b.lower {
-                    self.tighten_row(base, other, ratio, Side::Lower, intersection.lower);
-                }
-                if intersection.upper < b.upper {
-                    self.tighten_row(base, other, ratio, Side::Upper, intersection.upper);
-                }
-                self.delete_row(other);
             }
         }
         Ok(comparisons)
+    }
+
+    /// Authoritative comparison and mutation, shared by both discovery paths.
+    fn merge_parallel_rows(&mut self, base: usize, other: usize) -> Result<bool, Certificate> {
+        let Some((ratio, exact)) =
+            proportional(self.a.row(base), self.a.row(other), self.numerics.parallel)
+        else {
+            return Ok(false);
+        };
+        let RowDomain::Linear(b) = self.rows[base] else {
+            return Ok(false);
+        };
+        let RowDomain::Linear(c) = self.rows[other] else {
+            return Ok(false);
+        };
+        let (cl, cu) = if ratio > 0.0 {
+            (c.lower, c.upper)
+        } else {
+            (c.upper, c.lower)
+        };
+        let lower = ratio * cl;
+        let upper = ratio * cu;
+        if (cl.is_finite() && !lower.is_finite()) || (cu.is_finite() && !upper.is_finite()) {
+            return Ok(false);
+        }
+        let intersection = Bounds {
+            lower: b.lower.max(lower),
+            upper: b.upper.min(upper),
+        };
+        if intersection.lower > intersection.upper {
+            let gap = intersection.lower - intersection.upper;
+            if !exact
+                || gap
+                    <= self.numerics.feasibility
+                        * (1.0 + intersection.lower.abs().max(intersection.upper.abs()))
+            {
+                return Ok(false);
+            }
+            let mut point = Point::zeros(self.bounds.len(), self.rows.len());
+            point.y[base] = if b.lower > upper { 1.0 } else { -1.0 };
+            point.y[other] = -ratio * point.y[base];
+            return Err(Certificate {
+                mode: Recovery::PrimalInfeasibility,
+                point,
+            });
+        }
+        if intersection.equality() && !b.equality() && !exact {
+            return Ok(false);
+        }
+        if intersection.lower > b.lower {
+            self.tighten_row(base, other, ratio, Side::Lower, intersection.lower);
+        }
+        if intersection.upper < b.upper {
+            self.tighten_row(base, other, ratio, Side::Upper, intersection.upper);
+        }
+        self.replace_row(other, &[], RowDomain::Deleted);
+        self.postsolve.rules.push(Rule::MergedRow {
+            keep: base,
+            removed: other,
+            ratio,
+        });
+        Ok(true)
     }
 
     pub fn parallel_columns(&mut self, executor: &Executor) -> Result<usize, Certificate> {

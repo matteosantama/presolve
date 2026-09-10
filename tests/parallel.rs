@@ -264,3 +264,165 @@ fn column(matrix: &CscMatrix, j: usize) -> impl Iterator<Item = (usize, f64)> + 
         .copied()
         .zip(matrix.values()[start..end].iter().copied())
 }
+
+fn collided_rows(classes: usize, width: usize, factor: f64) -> ProblemData {
+    let m = 1 + 2 * classes;
+    let mut ai = Vec::with_capacity(m * width);
+    let mut aj = Vec::with_capacity(m * width);
+    let mut av = Vec::with_capacity(m * width);
+    for i in 0..m {
+        let class = i.div_ceil(2);
+        let scale = if i > 0 && i % 2 == 0 { factor } else { 1.0 };
+        for j in 0..width {
+            ai.push(i);
+            aj.push(j);
+            av.push(
+                scale
+                    * if j + 1 == width {
+                        1.0 + class as f64 * 2e-10
+                    } else {
+                        1.0
+                    },
+            );
+        }
+    }
+    ProblemData {
+        p: None,
+        c: vec![0.; width],
+        objective_constant: 0.,
+        a: CscMatrix::from_triplets(m, width, ai, aj, av).unwrap(),
+        rows: vec![
+            Constraint::Linear(Bounds {
+                lower: -1.,
+                upper: 1.
+            });
+            m
+        ],
+        variable_bounds: vec![Bounds::FREE; width],
+        cones: vec![],
+    }
+}
+
+#[test]
+fn hash_collisions_preserve_hidden_classes_with_bounded_comparisons() {
+    let rules = Rules {
+        parallel_rows: true,
+        ..Rules::none()
+    };
+    for (classes, width) in [(1, 2), (1024, 16)] {
+        for factor in [2., -2., 1e-250, -1e250] {
+            let input = collided_rows(classes, width, factor);
+            let mut reference = None;
+            for threads in [1, 4] {
+                let result = run(&input, rules, threads);
+                assert_eq!(result.stats.after.unwrap().linear_rows, classes + 1);
+                // The scheduler repeats discovery after the first reduction.
+                assert!(result.stats.parallel_comparisons <= 4 * input.rows.len());
+                let Outcome::Reduced(reduced) = result.outcome else {
+                    panic!("expected reduction")
+                };
+                let original = Solution {
+                    x: vec![0.; width],
+                    y: vec![0.; input.rows.len()],
+                    z: vec![0.; width],
+                    conic_dual: vec![],
+                    conic_slack: vec![],
+                };
+                let warm = reduced.postsolve.reduce_warm_start(original.as_ref());
+                same_solution(
+                    &original,
+                    &reduced.postsolve.recover_solution(warm.as_ref()),
+                );
+                let data = reduced.problem.into_csc();
+                if let Some((a, rows)) = reference.as_ref() {
+                    assert_eq!(&data.a, a);
+                    assert_eq!(&data.rows, rows);
+                } else {
+                    reference = Some((data.a, data.rows));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn hash_collision_does_not_hide_an_infeasibility_certificate() {
+    let mut input = collided_rows(1, 2, -2.);
+    input.rows[1] = Constraint::Linear(Bounds {
+        lower: 1.,
+        upper: 2.,
+    });
+    input.rows[2] = Constraint::Linear(Bounds {
+        lower: 1.,
+        upper: 2.,
+    });
+    let rules = Rules {
+        parallel_rows: true,
+        ..Rules::none()
+    };
+    let result = run(&input, rules, 1);
+    assert!(matches!(result.outcome, Outcome::Infeasible(_)));
+    same_result(result, run(&input, rules, 4), &input);
+}
+
+#[test]
+fn redundant_parallel_row_keeps_warm_start_stationarity_without_tightening() {
+    for scale in [1., -2.] {
+        let input = ProblemData {
+            p: None,
+            c: vec![2.; 2],
+            objective_constant: 0.,
+            a: CscMatrix::from_triplets(
+                2,
+                2,
+                vec![0, 0, 1, 1],
+                vec![0, 1, 0, 1],
+                vec![1., 1., scale, scale],
+            )
+            .unwrap(),
+            rows: vec![
+                Constraint::Linear(Bounds {
+                    lower: 1.,
+                    upper: f64::INFINITY,
+                }),
+                Constraint::Linear(if scale > 0. {
+                    Bounds {
+                        lower: scale,
+                        upper: f64::INFINITY,
+                    }
+                } else {
+                    Bounds {
+                        lower: f64::NEG_INFINITY,
+                        upper: scale,
+                    }
+                }),
+            ],
+            variable_bounds: vec![Bounds::FREE; 2],
+            cones: vec![],
+        };
+        let result = run(
+            &input,
+            Rules {
+                parallel_rows: true,
+                ..Rules::none()
+            },
+            1,
+        );
+        let Outcome::Reduced(r) = result.outcome else {
+            panic!("expected merged row");
+        };
+        let original = Solution {
+            x: vec![0.5; 2],
+            y: vec![0., 2. / scale],
+            z: vec![0.; 2],
+            conic_dual: vec![],
+            conic_slack: vec![],
+        };
+        let warm = r.postsolve.reduce_warm_start(original.as_ref());
+        assert_eq!(warm.y, vec![2.]);
+        let recovered = r.postsolve.recover_solution(warm.as_ref());
+        assert_eq!(recovered.y, vec![2., 0.]);
+        assert_eq!(recovered.x, original.x);
+        assert_eq!(recovered.z, original.z);
+    }
+}

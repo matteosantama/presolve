@@ -390,6 +390,7 @@ mod tests {
                     measurements: times
                         .iter()
                         .map(|&t| Measurement {
+                            equality_decisions: None,
                             before_bound_sides: None,
                             after_bound_sides: None,
                             elapsed_ns: (kind == Kind::Time).then_some(t),

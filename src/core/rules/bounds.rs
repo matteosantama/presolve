@@ -238,7 +238,10 @@ impl Model {
                 Side::Lower => value - old.lower,
                 Side::Upper => old.upper - value,
             };
-            if gain <= (1e4 * self.numerics.feasibility).max(0.01 * side.value(old).abs()) {
+            if gain
+                <= (self.propagation.minimum_gain_factor * self.numerics.feasibility)
+                    .max(self.propagation.minimum_relative_gain * side.value(old).abs())
+            {
                 return Ok(false);
             }
         }

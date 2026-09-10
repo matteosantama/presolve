@@ -36,7 +36,11 @@ pub(crate) struct Model {
     pub revision: usize,
     pub rules: crate::settings::Rules,
     pub numerics: crate::settings::Numerics,
+    pub propagation: crate::settings::PropagationSettings,
     pub equalities: crate::settings::EqualitySettings,
+    pub dependencies: crate::settings::DependencySettings,
+    pub equality_stats: crate::result::EqualityStats,
+    pub substitution_failure: super::objective::SubstitutionFailure,
     pub allow_hessian_growth: bool,
     pub deadline: Option<Instant>,
     pub cones: Vec<crate::problem::Cone>,
@@ -106,7 +110,11 @@ impl Model {
             revision: 0,
             rules: crate::settings::Rules::default(),
             numerics: crate::settings::Numerics::default(),
+            propagation: crate::settings::PropagationSettings::default(),
             equalities: crate::settings::EqualitySettings::default(),
+            dependencies: crate::settings::DependencySettings::default(),
+            equality_stats: crate::result::EqualityStats::default(),
+            substitution_failure: super::objective::SubstitutionFailure::Numerical,
             allow_hessian_growth: false,
             deadline: None,
             cones: vec![],
@@ -391,6 +399,8 @@ impl Model {
         effective_bounds: Bounds,
         max_fill: usize,
     ) -> bool {
+        use super::objective::SubstitutionFailure;
+        self.substitution_failure = SubstitutionFailure::Numerical;
         let row = equation.row;
         let pivot = self.a.get(row, column);
         if pivot == 0.0 {
@@ -444,6 +454,7 @@ impl Model {
                 .deadline
                 .is_some_and(|deadline| Instant::now() >= deadline)
             {
+                self.substitution_failure = SubstitutionFailure::Deadline;
                 return false;
             }
             let Some(domain) = shifted(self.rows[i], a * offset) else {
@@ -485,6 +496,7 @@ impl Model {
                 if value != 0.0 && old == 0.0 {
                     fill += 1;
                     if fill > max_fill {
+                        self.substitution_failure = SubstitutionFailure::ConstraintFill;
                         return false;
                     }
                 }
@@ -494,15 +506,19 @@ impl Model {
             }
             updates.push((i, entries, domain));
         }
-        let Some(gradient) = self.objective.substitute(
+        let gradient = match self.objective.try_substitute(
             column,
             offset,
             &slopes,
             max_fill - fill,
             self.allow_hessian_growth,
             self.deadline,
-        ) else {
-            return false;
+        ) {
+            Ok(gradient) => gradient,
+            Err(reason) => {
+                self.substitution_failure = reason;
+                return false;
+            }
         };
         for &(j, _) in gradient.terms.iter().chain(&slopes) {
             self.queues.column_changed(j, self.a.column(j).len());

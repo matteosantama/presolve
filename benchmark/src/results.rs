@@ -62,6 +62,8 @@ impl Counts {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Measurement {
+    #[serde(default)]
+    pub equality_decisions: Option<BTreeMap<String, usize>>,
     // None for size runs: those runs intentionally collect no timings.
     pub elapsed_ns: Option<u64>,
     #[serde(default)]

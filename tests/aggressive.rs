@@ -19,6 +19,7 @@ fn settings() -> Settings {
             require_linear_variable: false,
             preserve_nonzeros: false,
             work_limit: WorkLimit::Unlimited,
+            ..EqualitySettings::default()
         },
         progress: Progress::AnyChange,
         rules: Rules {
@@ -336,4 +337,252 @@ fn exhaustive_cycles_revisit_equalities_after_pivot_degrees_change() {
     let r = Presolver::new(s).unwrap().presolve(p);
     assert_eq!(r.stats.after.unwrap().linear_rows, 0);
     assert_eq!(r.stats.after.unwrap().variables, 4);
+}
+
+#[test]
+fn alternative_pivots_recover_after_a_fill_rejection() {
+    let input = ProblemData {
+        p: None,
+        c: vec![0.; 4],
+        objective_constant: 0.,
+        a: CscMatrix::from_triplets(
+            3,
+            4,
+            vec![0, 0, 0, 1, 1, 2, 2, 2],
+            vec![0, 1, 2, 0, 3, 1, 2, 3],
+            vec![1.; 8],
+        )
+        .unwrap(),
+        rows: vec![],
+        variable_bounds: vec![Bounds::FREE; 4],
+        cones: vec![],
+    };
+    let mut input = input;
+    input.rows = vec![
+        Constraint::Linear(Bounds::fixed(0.)),
+        Constraint::Linear(Bounds {
+            lower: -1.,
+            upper: 1.,
+        }),
+        Constraint::Linear(Bounds {
+            lower: -1.,
+            upper: 1.,
+        }),
+    ];
+    let mut options = settings();
+    options.substitution_fill = 1;
+    options.equalities.max_pivot_attempts = 1;
+    let first = Presolver::new(options.clone())
+        .unwrap()
+        .presolve(input.clone());
+    assert_eq!(first.stats.after.unwrap().variables, 4);
+    assert_eq!(first.stats.equalities.rejected_updates, 1);
+    assert_eq!(first.stats.equalities.constraint_fill_rejections, 1);
+    options.equalities.max_pivot_attempts = 2;
+    let next = Presolver::new(options).unwrap().presolve(input.clone());
+    assert_eq!(next.stats.after.unwrap().variables, 3);
+    assert_eq!(next.stats.equalities.attempts, 2);
+    assert_eq!(next.stats.equalities.accepted, 1);
+    let Outcome::Reduced(reduced) = next.outcome else {
+        panic!("expected reduction")
+    };
+    let point = Solution {
+        x: vec![0.; 4],
+        y: vec![0.; 3],
+        z: vec![0.; 4],
+        conic_dual: vec![],
+        conic_slack: vec![],
+    };
+    let warm = reduced.postsolve.reduce_warm_start(point.as_ref());
+    check_kkt(&input, &reduced.postsolve.recover_solution(warm.as_ref()));
+}
+
+#[test]
+fn candidate_scoring_counts_quadratic_work_and_pivot_screening_is_configurable() {
+    let mut input = equation(3, false);
+    input.p = Some(CscMatrix::from_triplets(3, 3, vec![0], vec![0], vec![1.]).unwrap());
+    let mut options = settings();
+    options.allow_hessian_growth = false;
+    options.equalities.max_pivot_attempts = 1;
+    options.equalities.cost_aware = false;
+    assert_eq!(
+        Presolver::new(options.clone())
+            .unwrap()
+            .presolve(input.clone())
+            .stats
+            .after
+            .unwrap()
+            .variables,
+        3
+    );
+    options.equalities.cost_aware = true;
+    let result = Presolver::new(options.clone())
+        .unwrap()
+        .presolve(input.clone());
+    assert_eq!(result.stats.after.unwrap().variables, 2);
+    assert_eq!(result.stats.after.unwrap().p_nonzeros, 1);
+    input.a.values_mut()[0] = 2.;
+    options.equalities.require_linear_variable = true;
+    for relative in [1., 0., -1., f64::NAN, 2.] {
+        options.equalities.relative_pivot = relative;
+        assert_eq!(
+            Presolver::new(options.clone())
+                .unwrap()
+                .presolve(input.clone())
+                .stats
+                .after
+                .unwrap()
+                .variables,
+            3
+        );
+    }
+    options.equalities.relative_pivot = 0.5;
+    assert_eq!(
+        Presolver::new(options)
+            .unwrap()
+            .presolve(input)
+            .stats
+            .after
+            .unwrap()
+            .variables,
+        2
+    );
+}
+
+#[test]
+fn pivot_policies_preserve_known_quadratic_optima() {
+    for seed in 0..24 {
+        let (m, n) = (4, 8);
+        let mut state = seed + 1u64;
+        let mut values = Vec::new();
+        let mut c = vec![-1.; n];
+        let mut rhs = vec![0.; m];
+        let y = [0.25, -0.5, 0.75, -1.];
+        for coefficient in &mut c {
+            for i in 0..m {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let value = ((state >> 32) % 9) as f64 - 4.;
+                values.push(value);
+                *coefficient += y[i] * value;
+                rhs[i] += value;
+            }
+        }
+        let input = ProblemData {
+            p: Some(
+                CscMatrix::from_triplets(n, n, (0..n).collect(), (0..n).collect(), vec![1.; n])
+                    .unwrap(),
+            ),
+            c,
+            objective_constant: 3.,
+            a: CscMatrix::from_triplets(
+                m,
+                n,
+                (0..n).flat_map(|_| 0..m).collect(),
+                (0..n).flat_map(|j| std::iter::repeat_n(j, m)).collect(),
+                values,
+            )
+            .unwrap(),
+            rows: rhs
+                .into_iter()
+                .map(|v| Constraint::Linear(Bounds::fixed(v)))
+                .collect(),
+            variable_bounds: vec![Bounds::FREE; n],
+            cones: vec![],
+        };
+        let optimum = Solution {
+            x: vec![1.; n],
+            y: y.to_vec(),
+            z: vec![0.; n],
+            conic_dual: vec![],
+            conic_slack: vec![],
+        };
+        let objective = check_kkt(&input, &optimum);
+        for relative in [1., 0.5, 0.1] {
+            for aware in [false, true] {
+                let mut options = settings();
+                options.equalities.relative_pivot = relative;
+                options.equalities.cost_aware = aware;
+                options.equalities.max_pivot_attempts = 4;
+                let result = Presolver::new(options).unwrap().presolve(input.clone());
+                match result.outcome {
+                    Outcome::Reduced(reduced) => {
+                        let warm = reduced.postsolve.reduce_warm_start(optimum.as_ref());
+                        let recovered = reduced.postsolve.recover_solution(warm.as_ref());
+                        assert!((check_kkt(&input, &recovered) - objective).abs() < 1e-8);
+                        assert!(
+                            (check_kkt(&reduced.problem.into_csc(), &warm) - objective).abs()
+                                < 1e-8
+                        );
+                    }
+                    Outcome::Unchanged(_) => {}
+                    outcome => panic!("unexpected {outcome:?}"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn propagation_gain_controls_are_independent_and_preserve_dual_recovery() {
+    for (rhs, old_upper) in [(1000., 1005.), (1., 1. + 1e-6)] {
+        let input = ProblemData {
+            p: None,
+            c: vec![-1., 0.],
+            objective_constant: 0.,
+            a: CscMatrix::from_triplets(1, 2, vec![0, 0], vec![0, 1], vec![1., 1.]).unwrap(),
+            rows: vec![Constraint::Linear(Bounds {
+                lower: f64::NEG_INFINITY,
+                upper: rhs,
+            })],
+            variable_bounds: vec![
+                Bounds {
+                    lower: 0.,
+                    upper: old_upper
+                };
+                2
+            ],
+            cones: vec![],
+        };
+        let mut options = Settings {
+            rules: Rules {
+                bound_propagation: true,
+                ..Rules::none()
+            },
+            ..Settings::default()
+        };
+        assert!(matches!(
+            Presolver::new(options.clone())
+                .unwrap()
+                .presolve(input.clone())
+                .outcome,
+            Outcome::Unchanged(_)
+        ));
+        options.propagation.minimum_relative_gain = 0.;
+        if rhs == 1. {
+            assert!(matches!(
+                Presolver::new(options.clone())
+                    .unwrap()
+                    .presolve(input.clone())
+                    .outcome,
+                Outcome::Unchanged(_)
+            ));
+        }
+        options.propagation.minimum_gain_factor = 1.;
+        let result = Presolver::new(options).unwrap().presolve(input.clone());
+        let Outcome::Reduced(reduced) = result.outcome else {
+            panic!("expected tighter bounds")
+        };
+        let point = Solution {
+            x: vec![rhs, 0.],
+            y: vec![0.],
+            z: vec![-1., 0.],
+            conic_dual: vec![],
+            conic_slack: vec![],
+        };
+        let recovered = reduced.postsolve.recover_solution(point.as_ref());
+        assert_eq!(check_kkt(&input, &recovered), -rhs);
+        let output = reduced.problem.into_csc();
+        assert!(output.variable_bounds.iter().all(|b| b.upper == rhs));
+        assert_eq!(check_kkt(&output, &point), -rhs);
+    }
 }

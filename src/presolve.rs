@@ -97,12 +97,26 @@ fn presolve_owned(
     model.objective.constant = problem.objective_constant;
     model.rules = settings.rules;
     model.numerics = settings.numerics;
+    model.propagation = settings.propagation;
+    let valid_gain = |value: f64, default| {
+        if value.is_finite() && value >= 0.0 {
+            value
+        } else {
+            default
+        }
+    };
+    model.propagation.minimum_relative_gain =
+        valid_gain(settings.propagation.minimum_relative_gain, 0.01);
+    model.propagation.minimum_gain_factor =
+        valid_gain(settings.propagation.minimum_gain_factor, 1e4);
     model.equalities = settings.equalities;
+    model.dependencies = settings.dependencies;
     model.allow_hessian_growth = settings.allow_hessian_growth;
     model.deadline = start.checked_add(settings.time_limit);
     model.set_cones(problem.cones.clone());
     let before = size(&model);
     let mut stats = Stats {
+        equalities: Default::default(),
         elapsed: Duration::ZERO,
         time_limit_reached: false,
         before,
@@ -121,6 +135,7 @@ fn presolve_owned(
         },
         executor,
     );
+    stats.equalities = model.equality_stats;
     stats.quadratic_changed = model.objective.p.revision != 0;
     let outcome = match phases {
         Err(certificate) => {

@@ -75,6 +75,16 @@ struct Tuning {
     equality_row_limit: Option<usize>,
     #[arg(long)]
     equality_column_limit: Option<usize>,
+    #[arg(long)]
+    equality_pivot_relative: Option<f64>,
+    #[arg(long)]
+    equality_pivot_attempts: Option<usize>,
+    #[arg(long, action = clap::ArgAction::Set)]
+    equality_cost_aware: Option<bool>,
+    #[arg(long)]
+    propagation_relative_gain: Option<f64>,
+    #[arg(long)]
+    propagation_gain_factor: Option<f64>,
     #[arg(long, value_enum)]
     sparsification: Option<SparsificationMode>,
 }

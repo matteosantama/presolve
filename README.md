@@ -5,7 +5,8 @@ The library simplifies a problem before it reaches a solver, then maps solutions
 and certificates back to the original variables and constraints.
 
 This README catalogs the implemented rules, their applicability, and how they
-interact. All 14 rule families are enabled by default.
+interact. Fourteen of the fifteen rule families are enabled by default; the bounded
+equality-dependency pass is enabled by the aggressive preset.
 
 ## Problem model and terminology
 
@@ -56,6 +57,7 @@ from fixing a variable themselves.
 | Substitution | `singleton_columns` | Eliminate a variable occurring in one linear row. |
 | Substitution | `doubleton_equalities` | Eliminate one variable from a two-variable equality. |
 | Substitution | `short_equalities` | Substitute from equalities under configurable candidate and fill limits. |
+| Redundancy | `equality_dependencies` | Remove exact linear combinations of equalities using a bounded scratch basis. |
 | Parallel structure | `parallel_rows` | Merge proportional linear constraints. |
 | Parallel structure | `parallel_columns` | Aggregate interchangeable variables or exploit objective dominance. |
 | Matrix sparsity | `sparsification` | Cancel shared coefficients between linear rows. |
@@ -202,9 +204,32 @@ and equality, leave `P` unchanged, and cap fill by the removed entries.
 `settings.equalities` can widen the row and column limits, admit bounded and
 quadratic pivots, remove the no-growth restriction on total constraint and
 Hessian nonzeros, and change the work allowance. Necessary bounds on a bounded
-pivot become a ranged row; bounds proved implied are omitted. The largest-pivot
-and finite-arithmetic checks remain in effect. The historical rule name is
-retained even when configured to process long equalities.
+pivot become a ranged row; bounds proved implied are omitted. `relative_pivot`
+defaults to `1.0` (maximum magnitude); lower values permit amplification and
+should be evaluated for the intended models. `max_pivot_attempts` defaults to
+`1`; raising it tries other eligible pivots after transactional rejection.
+`cost_aware` ranks candidates using estimated constraint and Hessian work.
+It defaults to `false`: measured speed and Hessian-size improvements came with
+mixed dimensional results. Work budgets include quadratic update visits under
+either ordering. Finite-arithmetic and cancellation checks remain in effect.
+`result.stats.equalities` reports candidate decisions and rejection reasons.
+The historical rule name is retained even for long equalities.
+
+**Equality dependencies — `equality_dependencies`.** After the ordinary phases,
+construct a bounded scratch basis of equality rows. Delete a row only after
+exact arithmetic establishes that both its coefficients and right-hand side
+are a linear combination of surviving equalities. No variables or Hessian
+entries change in this pass. An inconsistent exact relation can produce a
+Farkas certificate. Postsolve transfers deleted-row multipliers for warm starts.
+
+Products and differences must pass exactness checks; very small products whose
+rounding residual could underflow are rejected. This is a conservative subset
+of numerical rank detection and can miss dependent decimal-valued rows.
+`dependencies.max_row_length` (128), `max_basis_rows` (64), and `work_limit`
+(default four times A nonzeros) bound scratch work and memory. The pass runs
+once and drains consequences through the existing cleanup rules. It is enabled
+by `Settings::aggressive`; enable it explicitly elsewhere only when the extra
+reductions justify its measured cost.
 
 ### Parallel structure
 
@@ -315,12 +340,17 @@ time budget can still prevent further reductions.
 | `time_limit` | 60 seconds | Per-call soft budget including model construction and export preparation, excluding `Presolver` initialization; an in-progress transaction can finish before the limit is observed. |
 | `substitution_fill` | `64` | Maximum new constraint and Hessian coefficients per substitution; `usize::MAX` removes the cap. |
 | `allow_hessian_growth` | `false` | Permit a net increase in Hessian nonzeros; the fill cap still applies. |
+| `equalities.relative_pivot` | `1.0` | Minimum coefficient magnitude divided by the row maximum; invalid values use 1.0. |
+| `equalities.max_pivot_attempts` | `1` | Maximum alternative transactions per row and pass; 0 disables them. |
+| `equalities.cost_aware` | `false` | Prefer estimated A and P work after free-variable status, instead of column length. |
 | `equalities.max_row_length` | `8` | Maximum equality row length for the generalized substitution rule. |
 | `equalities.min_column_length` / `max_column_length` | `2` / `8` | Candidate pivot column degree range; use `1` / `usize::MAX` to admit all nonempty columns. |
 | `equalities.require_free_variable` | `true` | Require a variable with no explicit bounds. |
 | `equalities.require_linear_variable` | `true` | Require a pivot absent from the Hessian. |
 | `equalities.preserve_nonzeros` | `true` | Cap new coefficients by removed constraint entries, preventing net growth in total constraint and Hessian nonzeros. |
 | `equalities.work_limit` | `Default` | Estimated entry visits per pass; default is twice the current constraint nonzeros. |
+| `propagation.minimum_relative_gain` | `0.01` | Relative threshold for finite non-fixing bound changes; aggressive uses `0.005`. |
+| `propagation.minimum_gain_factor` | `1e4` | Absolute threshold multiplier applied to `numerics.feasibility`. |
 | `propagation.additional_rounds` | `3` | Extra propagation rounds after the initial pass; `usize::MAX` removes the cap. |
 | `propagation.work_limit` | `Default` | Work allowance across extra rounds; default is `max(constraint nonzeros / 4, 256)`. |
 | `progress` | `Nonzeros { minimum_reduction: 0.05 }` | Fractional nonzero decrease required to continue, or `AnyChange` to continue after any edit. |
@@ -332,7 +362,8 @@ time budget can still prevent further reductions.
 | `numerics.huge_bound` | `1e7` | Propagation skips candidate bounds with absolute value at least this large. |
 
 For propagation to improve an already finite bound, the gain must exceed
-`max(1e4 * feasibility, 0.01 * abs(old_bound))`, except when the new bound exactly
+`max(minimum_gain_factor * feasibility, minimum_relative_gain * abs(old_bound))`,
+using the propagation settings (defaults `1e4` and `0.01`), except when the new bound exactly
 meets the opposite bound. Singleton-row bound extraction does not use this gain
 filter or `huge_bound`. Numerical scaling and cancellation safeguards remain
 internal constants. Each `WorkLimit` accepts `Default`, `Entries(n)`, or
@@ -371,8 +402,10 @@ let settings = Settings::aggressive(Duration::from_secs(2));
 
 This enables unrestricted substitution fill and Hessian growth, admits bounded
 and quadratic equality pivots, continues after any model edit, and removes the
-extra propagation round and work caps. It uses equality-only sparsification and
-keeps the default numerical tolerances and one-thread execution.
+extra propagation round and work caps. It enables bounded exact equality
+dependency checks and lowers the relative propagation gain threshold to 0.005.
+It uses equality-only sparsification and keeps the default numerical tolerances
+and one-thread execution.
 
 Candidate equality rows and pivot columns are limited to 16 entries. These are
 search limits, not fill limits: a selected substitution can introduce any number
@@ -382,8 +415,8 @@ candidate. Set `equalities.max_row_length` and `equalities.max_column_length` to
 `usize::MAX` to remove these limits too. All preset fields remain editable.
 
 The preset is a starting point, not a guarantee of the smallest model on every
-problem. Read [the benchmark comparison](benchmark/AGGRESSIVE.md) for measured
-reductions, runtime, fill growth, and cases reaching the time budget.
+problem. Use the benchmark commands below to compare dimensions, finite bound
+sides, matrix nonzeros, runtime, and time-budget outcomes on your models.
 
 Equality substitution also rejects near-cancellation when a nonzero updated
 coefficient is smaller than `1e-10` times the larger contributing term. This
@@ -439,8 +472,12 @@ and size runs. `--preset default|fill|aggressive|unrestricted` selects the basel
 unrestricted fill with baseline searches, the measured aggressive configuration,
 or that configuration without equality length limits. Use `--time-limit-ms N`,
 `--equality-row-limit N`, `--equality-column-limit N`, and
-`--sparsification all|equalities|off` to override the preset. Metadata records the
-complete resulting settings, and measurements include finite variable-bound
+`--sparsification all|equalities|off` to override the preset. Pivot experiments
+also accept `--equality-pivot-relative R`, `--equality-pivot-attempts N`, and
+`--equality-cost-aware true|false`. Metadata records the
+complete resulting settings. Propagation experiments accept
+`--propagation-relative-gain R` and `--propagation-gain-factor F`; invalid
+(nonfinite or negative) values use the corresponding default. Measurements include finite variable-bound
 side counts. For example, to compare repeated-call performance:
 
 ```sh
@@ -481,7 +518,9 @@ conic slacks. `Postsolve` exposes solution recovery, primal-ray recovery,
 infeasibility-certificate recovery, and warm-start reduction. Native dual signs
 satisfy `P x + c - Aᵀ y - z + Gᵀ w = 0`: linear and bound multipliers are positive
 on lower sides and negative on upper sides. Recovery does not clip values or
-adjust them for interiority.
+adjust them for interiority. Forward warm starts can need solver refinement
+after redundant constraints are removed; they are not guaranteed to remain
+optimal or stationary.
 
 Reduced constraint storage is exported explicitly with `Problem::into_csc()` or
 `Problem::into_conic()`. The latter returns an additional map for translating

@@ -162,6 +162,13 @@ impl Model {
                 fast = true;
             }
         }
+        if !stats.time_limit && self.rules.equality_dependencies {
+            let deadline = start + limits.time;
+            if self.equality_dependencies(deadline)? > 0 {
+                self.sparsify_cleanup(limits, deadline)?;
+            }
+            stats.time_limit = Instant::now() >= deadline;
+        }
         if !stats.time_limit && limits.sparsify {
             let deadline = start + limits.time;
             if self.sparsify_rows(deadline, limits.sparsification) > 0 {

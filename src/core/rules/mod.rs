@@ -6,6 +6,7 @@
 
 mod bounds;
 mod cones;
+mod dependencies;
 mod dual_fixing;
 mod parallel;
 mod rows;

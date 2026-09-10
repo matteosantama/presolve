@@ -10,17 +10,21 @@ use crate::{
 use std::time::Instant;
 
 impl Model {
-    /// Equality substitution with configurable structural and work limits.
-    /// Retain the largest-magnitude pivot requirement to avoid amplification.
+    /// Equality substitution with bounded stable alternatives and sparse-work scoring.
     pub fn short_equalities(&mut self, max_fill: usize, deadline: Instant) {
         let options = self.equalities;
+        let relative = if options.relative_pivot > 0.0 && options.relative_pivot <= 1.0 {
+            options.relative_pivot
+        } else {
+            1.0
+        };
         let mut work = options.work_limit.resolve(self.a.nnz().saturating_mul(2));
+        let mut candidates = Vec::new();
         for i in self.queues.short_equalities.take_round() {
             if work == 0 || Instant::now() >= deadline {
                 if matches!(options.work_limit, crate::settings::WorkLimit::Default) {
                     break;
                 }
-                // A later cycle may have a fresh work allowance.
                 self.queues.short_equalities.push(i);
                 continue;
             }
@@ -30,59 +34,115 @@ impl Model {
             if !bounds.equality() {
                 continue;
             }
+            self.equality_stats.rows_examined += 1;
             let row = self.a.row(i);
             let length = row.len();
-            if length < 3 || length > options.max_row_length {
+            if length < 3 || length > options.max_row_length || options.max_pivot_attempts == 0 {
+                self.equality_stats.structural_rejections += 1;
                 continue;
             }
             let largest = row.iter().map(|(_, a)| a.abs()).fold(0.0, f64::max);
-            let pivot = row
-                .iter()
-                .filter_map(|(j, a)| {
-                    let degree = self.a.column(j).len();
-                    ((!options.require_free_variable || self.bounds[j] == Bounds::FREE)
-                        && (!options.require_linear_variable
-                            || self.objective.p.column(j).is_empty())
-                        && degree >= options.min_column_length
-                        && degree <= options.max_column_length
-                        && a.abs() == largest)
-                        .then_some((self.bounds[j] != Bounds::FREE, degree, j))
-                })
-                .min();
-            let Some((_, degree, j)) = pivot else {
-                continue;
-            };
-            let cost = self
-                .a
-                .column(j)
-                .iter()
-                .fold(length.saturating_mul(degree), |cost, (k, _)| {
+            candidates.clear();
+            for (j, a) in row {
+                let degree = self.a.column(j).len();
+                if (options.require_free_variable && self.bounds[j] != Bounds::FREE)
+                    || (options.require_linear_variable && !self.objective.p.column(j).is_empty())
+                    || degree < options.min_column_length
+                    || degree > options.max_column_length
+                {
+                    self.equality_stats.structural_rejections += 1;
+                    continue;
+                }
+                if a.abs() < largest && (relative == 1.0 || a.abs() / largest < relative) {
+                    self.equality_stats.pivot_rejections += 1;
+                    continue;
+                }
+                let diagonal = usize::from(self.objective.p.get(j, j) != 0.0);
+                let quadratic = (self.objective.p.column(j).len() - diagonal)
+                    .saturating_mul(length - 1)
+                    .saturating_add(
+                        diagonal.saturating_mul((length - 1).saturating_mul(length - 1)),
+                    )
+                    .saturating_mul(2);
+                let cost = length.saturating_mul(degree).saturating_add(quadratic);
+                let candidate = (
+                    self.bounds[j] != Bounds::FREE,
+                    if options.cost_aware { cost } else { degree },
+                    j,
+                    degree,
+                    cost,
+                );
+                if options.max_pivot_attempts == 1 && !candidates.is_empty() {
+                    if candidate < candidates[0] {
+                        candidates[0] = candidate;
+                    }
+                } else {
+                    candidates.push(candidate);
+                }
+            }
+            if candidates.len() > options.max_pivot_attempts {
+                candidates.select_nth_unstable(options.max_pivot_attempts);
+                candidates.truncate(options.max_pivot_attempts);
+            }
+            candidates.sort_unstable();
+            let mut deferred = false;
+            for &(_, _, j, degree, estimate) in candidates.iter().take(options.max_pivot_attempts) {
+                if Instant::now() >= deadline {
+                    deferred = true;
+                    break;
+                }
+                let cost = self.a.column(j).iter().fold(estimate, |cost, (k, _)| {
                     cost.saturating_add(self.a.row(k).len())
                 });
-            if cost > work {
-                if !matches!(options.work_limit, crate::settings::WorkLimit::Default) {
-                    self.queues.short_equalities.push(i);
+                if cost > work {
+                    self.equality_stats.work_rejections += 1;
+                    deferred = true;
+                    continue;
                 }
-                continue;
-            }
-            work -= cost;
-            let effective = if self.bounds[j] == Bounds::FREE {
-                Bounds::FREE
-            } else {
-                let implied = self.singleton_range(i, j, self.a.get(i, j), bounds.lower);
-                self.non_implied_bounds(j, implied)
-            };
-            let fill = if options.preserve_nonzeros {
-                let removed = degree.saturating_add(if effective == Bounds::FREE {
-                    length - 1
+                work -= cost;
+                self.equality_stats.estimated_work =
+                    self.equality_stats.estimated_work.saturating_add(cost);
+                let effective = if self.bounds[j] == Bounds::FREE {
+                    Bounds::FREE
                 } else {
-                    0
-                });
-                max_fill.min(removed)
-            } else {
-                max_fill
-            };
-            self.substitute(i, j, effective, fill);
+                    let implied = self.singleton_range(i, j, self.a.get(i, j), bounds.lower);
+                    self.non_implied_bounds(j, implied)
+                };
+                let fill = if options.preserve_nonzeros {
+                    let removed = degree.saturating_add(if effective == Bounds::FREE {
+                        length - 1
+                    } else {
+                        0
+                    });
+                    max_fill.min(removed)
+                } else {
+                    max_fill
+                };
+                self.equality_stats.attempts += 1;
+                if self.substitute(i, j, effective, fill) {
+                    self.equality_stats.accepted += 1;
+                    deferred = false;
+                    break;
+                }
+                self.equality_stats.rejected_updates += 1;
+                use crate::core::objective::SubstitutionFailure;
+                match self.substitution_failure {
+                    SubstitutionFailure::Numerical => self.equality_stats.numerical_rejections += 1,
+                    SubstitutionFailure::ConstraintFill => {
+                        self.equality_stats.constraint_fill_rejections += 1
+                    }
+                    SubstitutionFailure::QuadraticFill => {
+                        self.equality_stats.quadratic_fill_rejections += 1
+                    }
+                    SubstitutionFailure::HessianGrowth => {
+                        self.equality_stats.hessian_growth_rejections += 1
+                    }
+                    SubstitutionFailure::Deadline => self.equality_stats.deadline_rejections += 1,
+                }
+            }
+            if deferred && !matches!(options.work_limit, crate::settings::WorkLimit::Default) {
+                self.queues.short_equalities.push(i);
+            }
         }
     }
 
