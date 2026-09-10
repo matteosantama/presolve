@@ -138,8 +138,7 @@ impl Model {
 
     pub fn add_variable(&mut self, bounds: Bounds) -> usize {
         let j = self.a.add_column();
-        self.objective.p.add_row();
-        self.objective.p.add_column();
+        self.objective.p.add_variable();
         self.objective.c.push(0.0);
         self.bounds.push(bounds);
         self.alive.push(true);

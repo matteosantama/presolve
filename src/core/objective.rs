@@ -3,7 +3,7 @@
 //! Sparse quadratic objective updates under affine transformations.
 //! Every affine substitution applies P' = T^T P T, c' = T^T(c+P d).
 
-use crate::matrix::sparse::{Entries, SparseMatrix};
+use crate::matrix::sparse::{Entries, SymmetricMatrix};
 use std::time::Instant;
 
 #[derive(Clone, Copy, Debug)]
@@ -57,7 +57,7 @@ impl Scratch {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Objective {
-    pub p: SparseMatrix,
+    pub p: SymmetricMatrix,
     pub c: Vec<f64>,
     pub constant: f64,
     pub scratch: Scratch,
@@ -226,17 +226,13 @@ impl Objective {
             if scratch.linear.iter().any(|e| !e.1.is_finite()) {
                 return Err(SubstitutionFailure::Numerical);
             }
-            self.p.remove_row(k);
-            self.p.remove_column(k);
+            self.p.remove_variable(k);
             self.c[k] = 0.0;
             for &(j, c) in &scratch.linear {
                 self.c[j] = c;
             }
             for &(j, l, p) in &scratch.quadratic {
                 self.p.set(j, l, p);
-                if j != l {
-                    self.p.set(l, j, p);
-                }
             }
             self.constant = constant;
             Ok(gradient)
@@ -274,8 +270,7 @@ impl Objective {
     }
 
     pub fn aggregate(&mut self, column: usize) {
-        self.p.remove_row(column);
-        self.p.remove_column(column);
+        self.p.remove_variable(column);
         self.c[column] = 0.0;
     }
 }
@@ -303,7 +298,7 @@ mod tests {
                 })
                 .collect();
             let mut objective = Objective {
-                p: SparseMatrix::from_matrix(
+                p: SymmetricMatrix::from_matrix(
                     &crate::matrix::test_matrix(n, n, dense.clone()).unwrap(),
                 ),
                 c: (0..n).map(|j| j as f64 - 2.).collect(),
@@ -344,7 +339,7 @@ mod tests {
             }
         }
         let mut objective = Objective {
-            p: SparseMatrix::zeros(n, n),
+            p: SymmetricMatrix::zeros(n),
             c: vec![1.; n],
             constant: 0.,
             scratch: Default::default(),
@@ -373,7 +368,7 @@ mod tests {
         let n = 4097;
         let slopes: Vec<_> = (1..n).map(|j| (j, 1.0)).collect();
         let mut objective = Objective {
-            p: SparseMatrix::zeros(n, n),
+            p: SymmetricMatrix::zeros(n),
             c: vec![0.0; n],
             constant: 0.0,
             scratch: Default::default(),
@@ -413,7 +408,9 @@ mod tests {
             vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
         ] {
             let mut objective = Objective {
-                p: SparseMatrix::from_matrix(&crate::matrix::test_matrix(3, 3, entries).unwrap()),
+                p: SymmetricMatrix::from_matrix(
+                    &crate::matrix::test_matrix(3, 3, entries).unwrap(),
+                ),
                 c: vec![2.0, 3.0, 4.0],
                 constant: 5.0,
                 scratch: Default::default(),
@@ -436,7 +433,7 @@ mod tests {
     #[test]
     fn permitted_growth_preserves_the_objective_and_deadlines_are_transactional() {
         let mut objective = Objective {
-            p: SparseMatrix::from_matrix(
+            p: SymmetricMatrix::from_matrix(
                 &crate::matrix::test_matrix(3, 3, vec![2., 1., 0., 1., 2., 0., 0., 0., 1.])
                     .unwrap(),
             ),
@@ -459,7 +456,7 @@ mod tests {
             }
         }
         let mut wide = Objective {
-            p: SparseMatrix::zeros(65, 65),
+            p: SymmetricMatrix::zeros(65),
             c: vec![1.; 65],
             constant: 7.,
             scratch: Default::default(),
@@ -493,7 +490,9 @@ mod tests {
             ),
         ] {
             let mut objective = Objective {
-                p: SparseMatrix::from_matrix(&crate::matrix::test_matrix(3, 3, entries).unwrap()),
+                p: SymmetricMatrix::from_matrix(
+                    &crate::matrix::test_matrix(3, 3, entries).unwrap(),
+                ),
                 c: vec![2.0, 3.0, 4.0],
                 constant: 5.0,
                 scratch: Default::default(),
@@ -521,7 +520,7 @@ mod tests {
         // (x0 + x1)^2 becomes (x2 + x3)^2. Removing the pivot accounts for
         // three entries; cancelling the remaining x1 diagonal pays for the fourth.
         let mut objective = Objective {
-            p: SparseMatrix::zeros(4, 4),
+            p: SymmetricMatrix::zeros(4),
             c: vec![0.0; 4],
             constant: 0.0,
             scratch: Default::default(),
@@ -548,7 +547,7 @@ mod tests {
     #[test]
     fn substitution_allows_exact_cancellation_at_a_missing_entry() {
         let mut objective = Objective {
-            p: SparseMatrix::from_matrix(
+            p: SymmetricMatrix::from_matrix(
                 &crate::matrix::test_matrix(
                     3,
                     3,

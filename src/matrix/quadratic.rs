@@ -1,5 +1,5 @@
 //! Lazy quadratic export. The working Hessian remains owned until requested.
-use crate::matrix::sparse::SparseMatrix;
+use crate::matrix::sparse::SymmetricMatrix;
 use crate::matrix::{CscMatrix, CscMatrixRef};
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ pub(crate) enum Quadratic {
 }
 #[derive(Clone, Debug)]
 pub(crate) struct SparseQuadratic {
-    matrix: SparseMatrix,
+    matrix: SymmetricMatrix,
     compact_to_stable_columns: Arc<Vec<usize>>,
     stable_to_compact_columns: Arc<Vec<usize>>,
 }
@@ -56,7 +56,7 @@ impl Quadratic {
         QuadraticRef { inner: self }
     }
     pub fn from_sparse(
-        matrix: SparseMatrix,
+        matrix: SymmetricMatrix,
         compact_to_stable_columns: Arc<Vec<usize>>,
         stable_to_compact_columns: Arc<Vec<usize>>,
     ) -> Self {
@@ -66,12 +66,14 @@ impl Quadratic {
             stable_to_compact_columns,
         }))
     }
-    pub fn working(&self) -> SparseMatrix {
+    pub fn working(&self) -> SymmetricMatrix {
         match self {
-            Self::Csc(p) => SparseMatrix::from_upper_columns(p.columns(), |j| p.as_ref().column(j)),
+            Self::Csc(p) => {
+                SymmetricMatrix::from_upper_columns(p.columns(), |j| p.as_ref().column(j))
+            }
             Self::Sparse(_) => {
                 let p = self.as_ref();
-                SparseMatrix::from_upper_columns(p.columns(), |j| p.column(j))
+                SymmetricMatrix::from_upper_columns(p.columns(), |j| p.column(j))
             }
         }
     }

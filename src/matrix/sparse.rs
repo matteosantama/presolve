@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Modified for this library; copyright and attribution notices are in NOTICE.
-//! Editable sparse storage with sorted row and column vectors.
+//! Editable symmetric Hessian storage with one sorted adjacency vector per variable.
 //! Indices remain stable until final packing.
 
 #[cfg(test)]
@@ -9,18 +9,16 @@ use crate::matrix::CscMatrix;
 pub(crate) type Entries = Vec<(usize, f64)>;
 
 #[derive(Clone, Debug)]
-pub(crate) struct SparseMatrix {
+pub(crate) struct SymmetricMatrix {
     rows: Vec<Entries>,
-    columns: Vec<Entries>,
     nnz: usize,
     pub revision: usize,
 }
 
-impl SparseMatrix {
-    pub fn zeros(rows: usize, columns: usize) -> Self {
+impl SymmetricMatrix {
+    pub fn zeros(n: usize) -> Self {
         Self {
-            rows: vec![Vec::new(); rows],
-            columns: vec![Vec::new(); columns],
+            rows: vec![Vec::new(); n],
             nnz: 0,
             revision: 0,
         }
@@ -28,14 +26,10 @@ impl SparseMatrix {
 
     #[cfg(test)]
     pub fn from_matrix(matrix: &CscMatrix) -> Self {
-        let mut out = Self::zeros(matrix.rows(), matrix.columns());
-        for j in 0..matrix.columns() {
-            for (i, v) in matrix.as_ref().column(j) {
-                out.set(i, j, v);
-            }
-        }
-        out.revision = 0;
-        out
+        assert_eq!(matrix.rows(), matrix.columns());
+        Self::from_upper_columns(matrix.columns(), |j| {
+            matrix.as_ref().column(j).filter(move |&(i, _)| i <= j)
+        })
     }
     pub fn from_upper_columns<I: Iterator<Item = (usize, f64)>>(
         n: usize,
@@ -66,24 +60,16 @@ impl SparseMatrix {
         // Lower entries arrive before the diagonal and upper entries, in order.
         let nnz = rows.iter().map(Vec::len).sum();
         Self {
-            columns: rows.clone(),
             rows,
             nnz,
             revision: 0,
         }
     }
 
-    pub fn add_row(&mut self) -> usize {
+    pub fn add_variable(&mut self) -> usize {
         self.revision += 1;
-        let i = self.rows.len();
+        let j = self.rows.len();
         self.rows.push(Vec::new());
-        i
-    }
-
-    pub fn add_column(&mut self) -> usize {
-        self.revision += 1;
-        let j = self.columns.len();
-        self.columns.push(Vec::new());
         j
     }
 
@@ -94,7 +80,7 @@ impl SparseMatrix {
         &self.rows[row]
     }
     pub fn column(&self, col: usize) -> &[(usize, f64)] {
-        &self.columns[col]
+        &self.rows[col]
     }
 
     pub fn get(&self, row: usize, column: usize) -> f64 {
@@ -111,12 +97,15 @@ impl SparseMatrix {
         }
         self.revision += 1;
         Self::set_entry(&mut self.rows[row], column, value);
-        Self::set_entry(&mut self.columns[column], row, value);
+        if row != column {
+            Self::set_entry(&mut self.rows[column], row, value);
+        }
+        let count = if row == column { 1 } else { 2 };
         if old == 0.0 {
-            self.nnz += 1;
+            self.nnz += count;
         }
         if value == 0.0 {
-            self.nnz -= 1;
+            self.nnz -= count;
         }
     }
 
@@ -131,21 +120,15 @@ impl SparseMatrix {
         }
     }
 
-    pub fn remove_row(&mut self, row: usize) -> Entries {
+    /// Remove both symmetric views while keeping all other variable IDs stable.
+    pub fn remove_variable(&mut self, column: usize) -> Entries {
         self.revision += 1;
-        let entries = std::mem::take(&mut self.rows[row]);
-        for &(column, _) in &entries {
-            Self::set_entry(&mut self.columns[column], row, 0.0);
-        }
-        self.nnz -= entries.len();
-        entries
-    }
-
-    pub fn remove_column(&mut self, column: usize) -> Entries {
-        self.revision += 1;
-        let entries = std::mem::take(&mut self.columns[column]);
+        let entries = std::mem::take(&mut self.rows[column]);
         for &(row, _) in &entries {
-            Self::set_entry(&mut self.rows[row], column, 0.0);
+            if row != column {
+                Self::set_entry(&mut self.rows[row], column, 0.0);
+                self.nnz -= 1;
+            }
         }
         self.nnz -= entries.len();
         entries
@@ -157,21 +140,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sparse_views_stay_consistent_through_fill_cancellation_and_deletion() {
-        let mut a = SparseMatrix::zeros(2, 3);
-        a.set(0, 0, 2.0);
-        a.set(0, 2, 3.0);
-        a.set(1, 0, -4.0);
-        a.set(1, 1, 5.0);
-        a.set(1, 0, 0.0);
-        a.set(1, 2, 6.0);
-        assert_eq!(a.row(1), [(1, 5.0), (2, 6.0)]);
-        assert_eq!(a.column(0), [(0, 2.0)]);
-        assert_eq!(a.column(2), [(0, 3.0), (1, 6.0)]);
-        assert_eq!(a.remove_column(2), [(0, 3.0), (1, 6.0)]);
-        assert_eq!(a.remove_row(0), [(0, 2.0)]);
-        a.set(0, 2, 7.0);
-        assert_eq!(a.column(2), [(0, 7.0)]);
-        assert_eq!(a.nnz(), 2);
+    fn symmetric_views_survive_fill_cancellation_removal_and_growth() {
+        let mut p = SymmetricMatrix::zeros(3);
+        p.set(0, 0, 2.0);
+        p.set(0, 2, 3.0);
+        p.set(1, 0, -4.0);
+        p.set(1, 1, 5.0);
+        p.set(0, 1, 0.0);
+        p.set(1, 2, 6.0);
+        assert_eq!(p.nnz(), 6);
+        assert_eq!(p.row(0), [(0, 2.0), (2, 3.0)]);
+        assert_eq!(p.column(2), [(0, 3.0), (1, 6.0)]);
+        assert!(std::ptr::eq(p.row(2), p.column(2)));
+        let revision = p.revision;
+        p.set(2, 0, 3.0);
+        assert_eq!(p.revision, revision);
+        assert_eq!(p.remove_variable(2), [(0, 3.0), (1, 6.0)]);
+        assert_eq!(p.nnz(), 2);
+        assert_eq!(p.remove_variable(0), [(0, 2.0)]);
+        assert_eq!(p.nnz(), 1);
+        assert_eq!(p.add_variable(), 3);
+        p.set(0, 3, 7.0);
+        assert_eq!(p.row(3), [(0, 7.0)]);
+        assert_eq!(p.nnz(), 3);
+        let cloned = p.clone();
+        p.remove_variable(3);
+        assert_eq!(cloned.get(3, 0), 7.0);
+        assert_eq!(p.nnz(), 1);
+    }
+
+    #[test]
+    fn upper_triangle_builds_sorted_full_adjacency_without_duplicate_payloads() {
+        let columns = [
+            vec![(0, 2.0)],
+            vec![(0, -1.0)],
+            vec![(0, 0.0), (1, 3.0), (2, 4.0)],
+        ];
+        let p = SymmetricMatrix::from_upper_columns(3, |j| columns[j].iter().copied());
+        assert_eq!(p.row(0), [(0, 2.0), (1, -1.0)]);
+        assert_eq!(p.row(1), [(0, -1.0), (2, 3.0)]);
+        assert_eq!(p.row(2), [(1, 3.0), (2, 4.0)]);
+        assert_eq!(p.nnz(), 6);
+        assert_eq!(p.revision, 0);
     }
 }

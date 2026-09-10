@@ -243,7 +243,7 @@ impl Problem {
     pub(crate) fn take_objective(&mut self) -> crate::core::objective::Objective {
         crate::core::objective::Objective {
             p: self.p.as_ref().map_or_else(
-                || crate::matrix::sparse::SparseMatrix::zeros(self.c.len(), self.c.len()),
+                || crate::matrix::sparse::SymmetricMatrix::zeros(self.c.len()),
                 Quadratic::working,
             ),
             c: std::mem::take(&mut self.c),
