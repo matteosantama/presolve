@@ -6,10 +6,11 @@ resolver = "3"
 name = "presolve"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.86"
+rust-version = "1.89"
 description = "Sparse presolve and postsolve for convex quadratic and conic optimization"
 license = "Apache-2.0"
 
 [dependencies]
 rayon = "1.12"
 thiserror = "2"
+wide = { version = "1.7.0", default-features = false }

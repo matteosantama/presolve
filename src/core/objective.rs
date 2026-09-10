@@ -165,7 +165,8 @@ impl Objective {
             let mut update =
                 |j: usize, l: usize, missing: bool| -> Result<(), SubstitutionFailure> {
                     visits += 1;
-                    if visits % 1024 == 0 && deadline.is_some_and(|d| Instant::now() >= d) {
+                    if visits.is_multiple_of(1024) && deadline.is_some_and(|d| Instant::now() >= d)
+                    {
                         return Err(SubstitutionFailure::Deadline);
                     }
                     let a = &scratch.affected[j];

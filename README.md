@@ -530,7 +530,7 @@ See [results](src/result.rs), [postsolve](src/postsolve/mod.rs), and
 
 ## Development
 
-Requires Rust 1.86 or newer. Run the library tests and documentation examples with:
+Requires Rust 1.89 or newer. Run the library tests and documentation examples with:
 
 ```sh
 cargo test -p presolve

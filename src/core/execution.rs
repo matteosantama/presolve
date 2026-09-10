@@ -37,14 +37,12 @@ impl Executor {
         enough_work: bool,
         map: impl Fn(usize) -> Option<T> + Sync,
     ) -> Vec<T> {
-        if enough_work {
-            if let Self::Parallel(pool) = self {
-                return pool.install(|| {
-                    let mut values: Vec<_> = (0..count).into_par_iter().filter_map(&map).collect();
-                    values.par_sort_unstable();
-                    values
-                });
-            }
+        if enough_work && let Self::Parallel(pool) = self {
+            return pool.install(|| {
+                let mut values: Vec<_> = (0..count).into_par_iter().filter_map(&map).collect();
+                values.par_sort_unstable();
+                values
+            });
         }
         let mut values: Vec<_> = (0..count).filter_map(map).collect();
         values.sort_unstable();

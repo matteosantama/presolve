@@ -11,6 +11,7 @@ use crate::{
     postsolve::tape::{Certificate, Point, Recovery, Rule, Side},
     problem::Bounds,
 };
+use wide::{f64x4, u32x4};
 
 // Avoid scheduling small scans. Work estimates count constraint entries and,
 // for columns, full symmetric Hessian entries. These are initial cutoffs, not
@@ -20,16 +21,54 @@ const MIN_PARALLEL_NONZEROS: usize = 32 * 1024;
 
 /// djb2 support hash and rounded, sign-normalized coefficient hash.
 /// Division by the maximum avoids overflow from forming its reciprocal first.
-fn fingerprint<I: Iterator<Item = (usize, f64)> + Clone>(entries: I) -> (u32, u32) {
+#[inline]
+fn fingerprint<I: ExactSizeIterator<Item = (usize, f64)> + Clone>(mut entries: I) -> (u32, u32) {
     let max = entries.clone().map(|(_, v)| v.abs()).fold(0.0, f64::max);
     let sign = entries.clone().next().unwrap().1.signum();
-    entries.fold((5381u32, 5381u32), |(support, coefficients), (j, a)| {
+    let scalar = |(support, coefficients): (u32, u32), (j, a): (usize, f64)| {
         let quantized = (1e6 * (a / max) * sign).round() as i32 as u32;
         (
             support.wrapping_mul(33).wrapping_add(j as u32),
             coefficients.wrapping_mul(33).wrapping_add(quantized),
         )
-    })
+    };
+    // Packing costs more than it saves on very short rows/columns.
+    if entries.len() < 8 {
+        return entries.fold((5381, 5381), scalar);
+    }
+
+    // Four interleaved djb2 streams advance by 33^4 per block. Weighting
+    // them by [33^3, 33^2, 33, 1] at the end reconstructs the original hash
+    // modulo 2^32, including the seed. This avoids a reduction in every block.
+    const SEED: u32x4 = u32x4::new([0, 0, 0, 5381]);
+    const STRIDE: u32x4 = u32x4::new([1_185_921; 4]);
+    const WEIGHTS: u32x4 = u32x4::new([35_937, 1089, 33, 1]);
+    const MILLION: f64x4 = f64x4::new([1e6; 4]);
+    let mut support = SEED;
+    let mut coefficients = support;
+    let scale = f64x4::splat(max);
+    let sign = f64x4::splat(sign);
+    while entries.len() >= 4 {
+        // Stack packing works for both contiguous Hessian adjacency and
+        // linked matrix iterators without allocating or changing traversal.
+        let block = std::array::from_fn::<_, 4, _>(|_| entries.next().unwrap());
+        let values = f64x4::new(block.map(|(_, a)| a));
+        let normalized = MILLION * (values / scale) * sign;
+        // Keep Rust's ties-away-from-zero rounding in each lane.
+        // Normalization bounds finite values by 1e6, so converting
+        // via i64 preserves the original i32 result (and NaN still maps to 0)
+        // while allowing SIMD conversion on targets with 64-bit float lanes.
+        let quantized = normalized.to_array().map(|a| a.round() as i64 as u32);
+        support = support * STRIDE + u32x4::new(block.map(|(j, _)| j as u32));
+        coefficients = coefficients * STRIDE + u32x4::new(quantized);
+    }
+    let collapse = |lanes: u32x4| {
+        (lanes * WEIGHTS)
+            .to_array()
+            .into_iter()
+            .fold(0u32, u32::wrapping_add)
+    };
+    entries.fold((collapse(support), collapse(coefficients)), scalar)
 }
 
 /// Returns A_base / A_other, plus whether equality is exact in floating-point
@@ -289,9 +328,145 @@ impl Model {
 mod tests {
     use super::*;
 
+    fn scalar_fingerprint<I: Iterator<Item = (usize, f64)> + Clone>(entries: I) -> (u32, u32) {
+        let max = entries.clone().map(|(_, a)| a.abs()).fold(0.0, f64::max);
+        let sign = entries.clone().next().unwrap().1.signum();
+        entries.fold((5381u32, 5381u32), |(h, g), (j, a)| {
+            let q = (1e6 * (a / max) * sign).round() as i32 as u32;
+            (
+                h.wrapping_mul(33).wrapping_add(j as u32),
+                g.wrapping_mul(33).wrapping_add(q),
+            )
+        })
+    }
+
+    #[test]
+    fn fingerprints_preserve_scalar_rounding_tails_and_overflow() {
+        let mut random = 0x1234_5678_abcd_ef01u64;
+        for len in 1..=129 {
+            for _ in 0..16 {
+                let entries: Vec<_> = (0..len)
+                    .map(|_| {
+                        random ^= random << 13;
+                        random ^= random >> 7;
+                        random ^= random << 17;
+                        // Include subnormals and both signs, excluding NaN/Inf.
+                        let bits = (random & 0x800f_ffff_ffff_ffff) | ((random % 2047) << 52);
+                        (random as usize, f64::from_bits(bits))
+                    })
+                    .collect();
+                assert_eq!(
+                    fingerprint(entries.iter().copied()),
+                    scalar_fingerprint(entries.iter().copied()),
+                    "length {len}"
+                );
+            }
+        }
+
+        let half = 0.5f64;
+        let cases = [
+            vec![
+                1e6,
+                half.next_down(),
+                half,
+                half.next_up(),
+                -half.next_down(),
+                -half,
+                -half.next_up(),
+                1.5,
+                -1.5,
+                2.5,
+                -2.5,
+            ],
+            vec![
+                f64::MAX,
+                -f64::MAX,
+                f64::MIN_POSITIVE,
+                f64::from_bits(1),
+                -f64::from_bits(1),
+                0.0,
+                -0.0,
+                1.0,
+                -1.0,
+            ],
+            vec![
+                f64::from_bits(1),
+                -f64::from_bits(1),
+                f64::from_bits(2),
+                -f64::from_bits(2),
+                0.0,
+                -0.0,
+                f64::from_bits(3),
+                f64::from_bits(4),
+            ],
+            vec![0.0; 11],
+            vec![
+                f64::INFINITY,
+                f64::NAN,
+                1.0,
+                -1.0,
+                -f64::INFINITY,
+                0.0,
+                -0.0,
+                2.0,
+                3.0,
+            ],
+        ];
+        for values in cases {
+            for sign in [1.0, -1.0] {
+                let entries: Vec<_> = values
+                    .iter()
+                    .enumerate()
+                    .map(|(j, a)| (usize::MAX - j, a * sign))
+                    .collect();
+                assert_eq!(
+                    fingerprint(entries.iter().copied()),
+                    scalar_fingerprint(entries.iter().copied())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fingerprints_match_on_fragmented_linked_rows_and_columns() {
+        use crate::matrix::linked::LinkedMatrix;
+        for len in [2, 7, 8, 9, 15, 16, 17, 64, 129] {
+            for (rows, cols) in [(len, 3), (3, len)] {
+                let mut matrix = LinkedMatrix::from_columns(rows, cols, |j| {
+                    (0..rows).map(move |i| {
+                        (
+                            i,
+                            (1 + i + 7 * j) as f64 * if i % 2 == 0 { 1.0 } else { -1.0 },
+                        )
+                    })
+                });
+                // Reusing the free list in deletion order reverses physical
+                // slot order, while the logical rows and columns stay sorted.
+                for i in (0..rows).step_by(2) {
+                    for j in (0..cols).step_by(2) {
+                        matrix.set(i, j, 0.0);
+                    }
+                }
+                for i in (0..rows).step_by(2) {
+                    for j in (0..cols).step_by(2) {
+                        matrix.set(i, j, (1 + i + 7 * j) as f64);
+                    }
+                }
+                for view in (0..rows)
+                    .map(|i| matrix.row(i))
+                    .chain((0..cols).map(|j| matrix.column(j)))
+                {
+                    let expected = scalar_fingerprint(view.iter());
+                    assert_eq!(fingerprint(view.iter()), expected);
+                    assert_eq!(fingerprint(view.to_vec().iter().copied()), expected);
+                }
+            }
+        }
+    }
+
     #[test]
     fn discovery_uses_requested_threads_and_preserves_filtered_group_order() {
-        let key = |i: usize| (i % 5 != 0).then_some(i % 17);
+        let key = |i: usize| (!i.is_multiple_of(5)).then_some(i % 17);
         let executor = Executor::new(3).unwrap();
         let serial = candidate_groups(2048, MIN_PARALLEL_NONZEROS, &Executor::Serial, key);
         let parallel = candidate_groups(2048, MIN_PARALLEL_NONZEROS, &executor, |i| {

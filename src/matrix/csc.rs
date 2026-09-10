@@ -97,14 +97,15 @@ impl CscMatrix {
 
         let mut canonical: Vec<(usize, usize, f64)> = Vec::with_capacity(triplets.len());
         for (column, row, value) in triplets {
-            if let Some((last_column, last_row, last_value)) = canonical.last_mut() {
-                if *last_column == column && *last_row == row {
-                    *last_value += value;
-                    if !last_value.is_finite() {
-                        return Err(MatrixError::NonFiniteValue);
-                    }
-                    continue;
+            if let Some((last_column, last_row, last_value)) = canonical.last_mut()
+                && *last_column == column
+                && *last_row == row
+            {
+                *last_value += value;
+                if !last_value.is_finite() {
+                    return Err(MatrixError::NonFiniteValue);
                 }
+                continue;
             }
             canonical.push((column, row, value));
         }
