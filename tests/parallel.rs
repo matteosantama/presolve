@@ -157,7 +157,7 @@ fn same_result(a: PresolveResult, b: PresolveResult, input: &ProblemData) {
 fn check_optimum(point: &Solution) {
     // Each independent block minimizes 0.5 * (sum(x) - 2)^2.
     assert!(point.x.iter().all(|x| (0.0..=1.0).contains(x)));
-    for block in point.x.chunks_exact(WIDTH) {
+    for block in point.x.as_chunks::<WIDTH>().0 {
         assert_eq!(block.iter().sum::<f64>(), 2.);
     }
     assert!(point.y.iter().chain(&point.z).all(|&v| v == 0.));
