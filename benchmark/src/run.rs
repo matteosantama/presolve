@@ -1,5 +1,5 @@
 use crate::results::{Case, Measurement, Metadata, RunWriter};
-use crate::{Kind, PoolMode, Result, Selection, data};
+use crate::{Kind, PoolMode, Preset, Result, Selection, SparsificationMode, Tuning, data};
 use presolve::{
     Presolver,
     problem::ProblemData,
@@ -38,7 +38,7 @@ const RULES: [(&str, Rules); 15] = rules!(
     cones,
 );
 
-pub fn settings(rule: &str, threads: usize) -> Result<Settings> {
+pub fn settings(rule: &str, threads: usize, tuning: &Tuning) -> Result<Settings> {
     let rules = RULES
         .iter()
         .find(|(name, _)| *name == rule)
@@ -49,11 +49,43 @@ pub fn settings(rule: &str, threads: usize) -> Result<Settings> {
             )
         })?
         .1;
-    Ok(Settings {
-        rules,
-        threads,
-        ..Settings::default()
-    })
+    let mut settings = match tuning.preset {
+        Preset::Default | Preset::Fill => Settings::default(),
+        Preset::Aggressive | Preset::Unrestricted => {
+            Settings::aggressive(std::time::Duration::from_secs(2))
+        }
+    };
+    settings.rules = rules;
+    settings.threads = threads;
+    if matches!(tuning.preset, Preset::Fill) {
+        settings.substitution_fill = usize::MAX;
+        settings.allow_hessian_growth = true;
+    }
+    if matches!(tuning.preset, Preset::Unrestricted) {
+        settings.equalities.max_row_length = usize::MAX;
+        settings.equalities.max_column_length = usize::MAX;
+    }
+    if let Some(ms) = tuning.time_limit_ms {
+        settings.time_limit = std::time::Duration::from_millis(ms);
+    }
+    if let Some(n) = tuning.equality_row_limit {
+        settings.equalities.max_row_length = n;
+    }
+    if let Some(n) = tuning.equality_column_limit {
+        settings.equalities.max_column_length = n;
+    }
+    if let Some(mode) = tuning.sparsification {
+        settings.rules.sparsification &= !matches!(mode, SparsificationMode::Off);
+        settings.sparsification.allow_auxiliary_variables = matches!(mode, SparsificationMode::All);
+    }
+    Ok(settings)
+}
+
+fn bound_sides(bounds: impl IntoIterator<Item = presolve::problem::Bounds>) -> usize {
+    bounds
+        .into_iter()
+        .map(|b| usize::from(b.lower.is_finite()) + usize::from(b.upper.is_finite()))
+        .sum()
 }
 
 pub fn measure(
@@ -62,6 +94,7 @@ pub fn measure(
     timed: bool,
     mode: PoolMode,
 ) -> Result<Measurement> {
+    let before_bound_sides = Some(bound_sides(input.variable_bounds.iter().copied()));
     let ready = if mode == PoolMode::Reused {
         let presolver = Presolver::new(settings.clone())?;
         if timed {
@@ -81,6 +114,16 @@ pub fn measure(
     };
     let result = presolver.presolve(input);
     let elapsed_ns = start.map(|start| start.elapsed().as_nanos().min(u64::MAX as u128) as u64);
+    let after_bound_sides = match &result.outcome {
+        Outcome::Unchanged(p) => Some(bound_sides(
+            (0..p.variable_count()).map(|j| p.variable_bounds(j)),
+        )),
+        Outcome::Reduced(r) => Some(bound_sides(
+            (0..r.problem.variable_count()).map(|j| r.problem.variable_bounds(j)),
+        )),
+        Outcome::Solved(_) => Some(0),
+        _ => None,
+    };
     let outcome = match &result.outcome {
         Outcome::Unchanged(_) => "unchanged",
         Outcome::Reduced(_) => "reduced",
@@ -90,6 +133,8 @@ pub fn measure(
     };
     Ok(Measurement {
         elapsed_ns,
+        before_bound_sides,
+        after_bound_sides,
         outcome: outcome.into(),
         before: result.stats.before.into(),
         after: result.stats.after.map(Into::into),
@@ -103,6 +148,7 @@ fn trial(
     rule: &str,
     threads: usize,
     mode: PoolMode,
+    tuning: &Tuning,
 ) -> Result<Measurement> {
     let mut command = Command::new(executable);
     command.arg("worker").arg(path).arg(rule);
@@ -111,6 +157,29 @@ fn trial(
         PoolMode::Cold => "cold",
         PoolMode::Reused => "reused",
     });
+    command.arg("--preset").arg(tuning.preset.as_str());
+    for (flag, value) in [
+        (
+            "--time-limit-ms",
+            tuning.time_limit_ms.map(|v| v.to_string()),
+        ),
+        (
+            "--equality-row-limit",
+            tuning.equality_row_limit.map(|v| v.to_string()),
+        ),
+        (
+            "--equality-column-limit",
+            tuning.equality_column_limit.map(|v| v.to_string()),
+        ),
+        (
+            "--sparsification",
+            tuning.sparsification.map(|v| v.as_str().to_owned()),
+        ),
+    ] {
+        if let Some(value) = value {
+            command.arg(flag).arg(value);
+        }
+    }
     let output = command.output()?;
     if !output.status.success() {
         return Err(format!(
@@ -135,7 +204,7 @@ fn fingerprint(path: &Path) -> Result<String> {
 
 pub fn run(root: &Path, kind: Kind, selection: Selection, trials: usize) -> Result<()> {
     if let Some(rule) = &selection.rule {
-        settings(rule, selection.threads)?;
+        settings(rule, selection.threads, &selection.tuning)?;
     }
     let rules: Vec<_> = RULES
         .iter()
@@ -172,7 +241,7 @@ pub fn run(root: &Path, kind: Kind, selection: Selection, trials: usize) -> Resu
         .filter(|out| out.status.success())
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
         .unwrap_or_default();
-    let config = settings("all", selection.threads)?;
+    let config = settings("all", selection.threads, &selection.tuning)?;
     let metadata = Metadata {
         version: 1,
         name: selection.name,
@@ -183,8 +252,11 @@ pub fn run(root: &Path, kind: Kind, selection: Selection, trials: usize) -> Resu
         // Execution width may differ in a valid scaling comparison. Keep it
         // separate from the algorithm settings, which must still match.
         settings: format!(
-            "time_limit: {:?}, rules: {:?}, numerics: {:?}, substitution_fill: {}",
-            config.time_limit, config.rules, config.numerics, config.substitution_fill
+            "{:?}",
+            Settings {
+                threads: 1,
+                ..config
+            }
         ),
         threads: selection.threads,
         pool_mode: selection.pool_mode,
@@ -215,7 +287,7 @@ pub fn run(root: &Path, kind: Kind, selection: Selection, trials: usize) -> Resu
                 let result = match &input {
                     Some(Ok(input)) => measure(
                         input.clone(),
-                        &settings(rule, selection.threads)?,
+                        &settings(rule, selection.threads, &selection.tuning)?,
                         false,
                         selection.pool_mode,
                     ),
@@ -226,6 +298,7 @@ pub fn run(root: &Path, kind: Kind, selection: Selection, trials: usize) -> Resu
                         rule,
                         selection.threads,
                         selection.pool_mode,
+                        &selection.tuning,
                     ),
                 };
                 match result {

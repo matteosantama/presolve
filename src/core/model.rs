@@ -13,7 +13,7 @@ use crate::{
     postsolve::tape::{Equation, RecoveryTape, Rule, Side},
     problem::Bounds,
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 /// Working row domains; conic coordinates remain distinct from ranged linear rows.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -36,6 +36,9 @@ pub(crate) struct Model {
     pub revision: usize,
     pub rules: crate::settings::Rules,
     pub numerics: crate::settings::Numerics,
+    pub equalities: crate::settings::EqualitySettings,
+    pub allow_hessian_growth: bool,
+    pub deadline: Option<Instant>,
     pub cones: Vec<crate::problem::Cone>,
     pub cone_rows: Vec<Vec<usize>>,
     pub changed_cones: crate::core::queues::Worklist,
@@ -103,6 +106,9 @@ impl Model {
             revision: 0,
             rules: crate::settings::Rules::default(),
             numerics: crate::settings::Numerics::default(),
+            equalities: crate::settings::EqualitySettings::default(),
+            allow_hessian_growth: false,
+            deadline: None,
             cones: vec![],
             cone_rows: vec![],
             changed_cones: crate::core::queues::Worklist::new(0),
@@ -243,6 +249,12 @@ impl Model {
                 self.changed_cones.push(block);
             }
             self.queues.singleton_activity_rows.push(i);
+            if !self.equalities.require_free_variable
+                && matches!(self.rows[i], RowDomain::Linear(b) if b.equality())
+                && self.a.row(i).len() >= 3
+            {
+                self.queues.short_equalities.push(i);
+            }
             if matches!(self.rows[i],RowDomain::Linear(b) if b.equality())
                 && self.a.row(i).len() == 2
             {
@@ -305,7 +317,10 @@ impl Model {
         else {
             return false;
         };
-        let Some(gradient) = self.objective.substitute(column, value, &[], 0) else {
+        let Some(gradient) = self
+            .objective
+            .substitute(column, value, &[], 0, false, None)
+        else {
             return false;
         };
         for &(j, _) in &gradient.terms {
@@ -425,6 +440,12 @@ impl Model {
         let mut fill = 0;
         let mut updates = Vec::with_capacity(other_rows.len());
         for &(i, a) in &other_rows {
+            if self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                return false;
+            }
             let Some(domain) = shifted(self.rows[i], a * offset) else {
                 return false;
             };
@@ -451,8 +472,14 @@ impl Model {
                 } else {
                     0.0
                 };
-                let value = old + a * v;
-                if !value.is_finite() {
+                let change = a * v;
+                let value = old + change;
+                // Do not turn cancellation roundoff into a tiny pivot in a
+                // later equality. Reject the whole substitution transaction;
+                // exact cancellations remain valid structural zeros.
+                if !value.is_finite()
+                    || (value != 0.0 && value.abs() < 1e-10 * old.abs().max(change.abs()))
+                {
                     return false;
                 }
                 if value != 0.0 && old == 0.0 {
@@ -467,10 +494,14 @@ impl Model {
             }
             updates.push((i, entries, domain));
         }
-        let Some(gradient) = self
-            .objective
-            .substitute(column, offset, &slopes, max_fill - fill)
-        else {
+        let Some(gradient) = self.objective.substitute(
+            column,
+            offset,
+            &slopes,
+            max_fill - fill,
+            self.allow_hessian_growth,
+            self.deadline,
+        ) else {
             return false;
         };
         for &(j, _) in gradient.terms.iter().chain(&slopes) {

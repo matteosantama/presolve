@@ -5,6 +5,7 @@ use crate::{
     matrix::sparse::Entries,
     postsolve::tape::Rule,
     problem::Bounds,
+    settings::SparsificationSettings,
 };
 use std::time::Instant;
 
@@ -58,7 +59,7 @@ fn subtract<I: Iterator<Item = (usize, f64)> + Clone>(
 }
 
 impl Model {
-    pub fn sparsify_rows(&mut self, deadline: Instant) -> usize {
+    pub fn sparsify_rows(&mut self, deadline: Instant, options: SparsificationSettings) -> usize {
         let m = self.rows.len();
         let mut seen = vec![usize::MAX; m];
         let mut ratios = vec![0.0; m];
@@ -73,12 +74,13 @@ impl Model {
             .filter(|(j, _)| self.alive[*j])
             .map(|(_, b)| packed_sides(*b))
             .sum();
-        let limit = self
+        let default_limit = self
             .a
             .nnz()
             .saturating_add(bound_entries)
             .saturating_mul(8)
             .max(1024);
+        let limit = options.work_limit.resolve(default_limit);
         let mut work = 0usize;
         let mut groups = 0;
         for reference in 0..m {
@@ -88,6 +90,9 @@ impl Model {
             let RowDomain::Linear(bounds) = self.rows[reference] else {
                 continue;
             };
+            if !options.allow_auxiliary_variables && !bounds.equality() {
+                continue;
+            }
             if self.a.row(reference).len() < 10 || packed_sides(bounds) == 0 {
                 continue;
             }

@@ -4,7 +4,7 @@
 //! Every affine substitution applies P' = T^T P T, c' = T^T(c+P d).
 
 use crate::matrix::sparse::{Entries, SparseMatrix};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Instant};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Gradient {
@@ -44,13 +44,15 @@ impl Objective {
     }
 
     /// Eliminate x_k = offset + sum slope_j*x_j. All arithmetic and fill checks
-    /// happen before mutation. The total number of P nonzeros must not increase.
+    /// happen before mutation. Hessian growth is controlled independently of fill.
     pub fn substitute(
         &mut self,
         k: usize,
         offset: f64,
         slopes: &[(usize, f64)],
         max_fill: usize,
+        allow_growth: bool,
+        deadline: Option<Instant>,
     ) -> Option<Gradient> {
         assert!(slopes.iter().all(|&(j, _)| j != k));
         let gradient = self.gradient(k);
@@ -64,7 +66,12 @@ impl Objective {
         let slopes_by_column: BTreeMap<_, _> = slopes.iter().copied().collect();
         let mut added = 0;
         let mut removed = 2 * self.p.column(k).len() - usize::from(diagonal != 0.0);
+        let mut visits = 0usize;
         let mut update_quadratic = |j: usize, l: usize, check_fill_only: bool| -> Option<()> {
+            visits += 1;
+            if visits % 1024 == 0 && deadline.is_some_and(|d| Instant::now() >= d) {
+                return None;
+            }
             let (j, l) = (j.min(l), j.max(l));
             let old = self.p.get(j, l);
             // Check missing coefficients before allocating updates to existing
@@ -121,7 +128,7 @@ impl Objective {
                 }
             }
         }
-        if added > removed {
+        if !allow_growth && added > removed {
             return None;
         }
         if linear
@@ -193,12 +200,20 @@ mod tests {
             constant: 0.0,
         };
         objective.c[0] = 2.0;
-        assert!(objective.substitute(0, 3.0, &slopes, 0).is_some());
+        assert!(
+            objective
+                .substitute(0, 3.0, &slopes, 0, false, None)
+                .is_some()
+        );
         assert_eq!(objective.constant, 6.0);
         assert_eq!(objective.p.nnz(), 0);
         assert!(objective.c[1..].iter().all(|&v| v == 2.0));
         objective.p.set(0, 0, 1.0);
-        assert!(objective.substitute(0, 0.0, &slopes, 64).is_none());
+        assert!(
+            objective
+                .substitute(0, 0.0, &slopes, 64, false, None)
+                .is_none()
+        );
         assert_eq!(objective.p.nnz(), 1);
     }
 
@@ -226,7 +241,7 @@ mod tests {
             let original = objective.clone();
             assert!(
                 objective
-                    .substitute(0, 2.0, &[(1, -1.0), (2, -1.0)], 64)
+                    .substitute(0, 2.0, &[(1, -1.0), (2, -1.0)], 64, false, None)
                     .is_none()
             );
             assert_eq!(objective.c, original.c);
@@ -236,6 +251,47 @@ mod tests {
                 assert_eq!(objective.p.column(i), original.p.column(i));
             }
         }
+    }
+
+    #[test]
+    fn permitted_growth_preserves_the_objective_and_deadlines_are_transactional() {
+        let mut objective = Objective {
+            p: SparseMatrix::from_matrix(
+                &crate::matrix::test_matrix(3, 3, vec![2., 1., 0., 1., 2., 0., 0., 0., 1.])
+                    .unwrap(),
+            ),
+            c: vec![2., 3., 4.],
+            constant: 5.,
+        };
+        let original = objective.clone();
+        assert!(
+            objective
+                .substitute(0, 2., &[(1, -1.), (2, -1.)], usize::MAX, true, None)
+                .is_some()
+        );
+        for y in [-2., 0., 3.] {
+            for z in [-3., 0., 2.] {
+                assert!(
+                    (value(&original, &[2. - y - z, y, z]) - value(&objective, &[0., y, z])).abs()
+                        < 1e-10
+                );
+            }
+        }
+        let mut wide = Objective {
+            p: SparseMatrix::zeros(65, 65),
+            c: vec![1.; 65],
+            constant: 7.,
+        };
+        wide.p.set(0, 0, 1.);
+        let slopes: Vec<_> = (1..65).map(|j| (j, 1.)).collect();
+        assert!(
+            wide.substitute(0, 2., &slopes, usize::MAX, true, Some(Instant::now()))
+                .is_none()
+        );
+        assert_eq!(wide.p.nnz(), 1);
+        assert_eq!(wide.p.get(0, 0), 1.);
+        assert_eq!(wide.c, vec![1.; 65]);
+        assert_eq!(wide.constant, 7.);
     }
 
     #[test]
@@ -260,7 +316,11 @@ mod tests {
                 constant: 5.0,
             };
             let original = objective.clone();
-            assert!(objective.substitute(0, 2.0, &slopes, 64).is_some());
+            assert!(
+                objective
+                    .substitute(0, 2.0, &slopes, 64, false, None)
+                    .is_some()
+            );
             assert_eq!(objective.p.nnz(), expected_nnz);
             assert!(objective.p.nnz() <= original.p.nnz());
             for y in [-2.0, 0.0, 3.0] {
@@ -289,7 +349,7 @@ mod tests {
         }
         assert!(
             objective
-                .substitute(0, 0.0, &[(1, -1.0), (2, 1.0), (3, 1.0)], 64)
+                .substitute(0, 0.0, &[(1, -1.0), (2, 1.0), (3, 1.0)], 64, false, None)
                 .is_some()
         );
         assert_eq!(objective.p.nnz(), 4);
@@ -318,7 +378,7 @@ mod tests {
         let original = objective.clone();
         assert!(
             objective
-                .substitute(0, 2.0, &[(1, 0.5), (2, 0.5)], 64)
+                .substitute(0, 2.0, &[(1, 0.5), (2, 0.5)], 64, false, None)
                 .is_some()
         );
         assert_eq!(objective.p.nnz(), 2);

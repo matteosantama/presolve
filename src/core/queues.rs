@@ -84,7 +84,7 @@ impl Queues {
             0 => self.empty_rows.push(row),
             1 => self.singleton_rows.push(row),
             2 if equality => self.doubleton_rows.push(row),
-            3..=8 if equality => self.short_equalities.push(row),
+            3.. if equality => self.short_equalities.push(row),
             _ => {}
         }
         self.changed_activities.push(row);

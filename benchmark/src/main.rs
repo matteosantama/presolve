@@ -26,6 +26,59 @@ enum PoolMode {
     Reused,
 }
 
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum Preset {
+    #[default]
+    Default,
+    /// Lift the substitution fill cap and allow Hessian growth.
+    Fill,
+    /// Use Settings::aggressive with a two-second budget unless overridden.
+    Aggressive,
+    /// Also remove the aggressive preset's equality row and column length caps.
+    Unrestricted,
+}
+impl Preset {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Fill => "fill",
+            Self::Aggressive => "aggressive",
+            Self::Unrestricted => "unrestricted",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SparsificationMode {
+    All,
+    Equalities,
+    Off,
+}
+impl SparsificationMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Equalities => "equalities",
+            Self::Off => "off",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Args)]
+struct Tuning {
+    #[arg(long, value_enum, default_value_t = Preset::Default)]
+    preset: Preset,
+    /// Override the per-call soft time budget in milliseconds.
+    #[arg(long)]
+    time_limit_ms: Option<u64>,
+    #[arg(long)]
+    equality_row_limit: Option<usize>,
+    #[arg(long)]
+    equality_column_limit: Option<usize>,
+    #[arg(long, value_enum)]
+    sparsification: Option<SparsificationMode>,
+}
+
 impl Kind {
     fn as_str(self) -> &'static str {
         match self {
@@ -67,6 +120,8 @@ enum Command {
     Worker {
         path: PathBuf,
         rule: String,
+        #[command(flatten)]
+        tuning: Tuning,
         #[arg(long, default_value_t = 1)]
         threads: usize,
         #[arg(long, value_enum, default_value_t = PoolMode::Cold)]
@@ -92,6 +147,8 @@ enum RunCommand {
 
 #[derive(Args)]
 struct Selection {
+    #[command(flatten)]
+    tuning: Tuning,
     /// Unique run name; existing results are never overwritten.
     #[arg(long)]
     name: String,
@@ -140,6 +197,7 @@ fn execute(cli: Cli) -> Result<()> {
         Command::Worker {
             path,
             rule,
+            tuning,
             threads,
             pool_mode,
         } => {
@@ -147,7 +205,7 @@ fn execute(cli: Cli) -> Result<()> {
                 return Err("worker requires a release build".into());
             }
             let input = data::read(&path)?;
-            let settings = run::settings(&rule, threads)?;
+            let settings = run::settings(&rule, threads, &tuning)?;
             let result = run::measure(input, &settings, true, pool_mode)?;
             serde_json::to_writer(std::io::stdout().lock(), &result)?;
             Ok(())

@@ -64,6 +64,10 @@ impl Counts {
 pub struct Measurement {
     // None for size runs: those runs intentionally collect no timings.
     pub elapsed_ns: Option<u64>,
+    #[serde(default)]
+    pub before_bound_sides: Option<usize>,
+    #[serde(default)]
+    pub after_bound_sides: Option<usize>,
     pub outcome: String,
     pub before: Counts,
     pub after: Option<Counts>,
@@ -72,7 +76,11 @@ pub struct Measurement {
 
 impl Measurement {
     pub fn same_result(&self, other: &Self) -> bool {
-        self.outcome == other.outcome && self.before == other.before && self.after == other.after
+        self.outcome == other.outcome
+            && self.before == other.before
+            && self.after == other.after
+            && self.before_bound_sides == other.before_bound_sides
+            && self.after_bound_sides == other.after_bound_sides
     }
 }
 

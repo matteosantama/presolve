@@ -97,6 +97,9 @@ fn presolve_owned(
     model.objective.constant = problem.objective_constant;
     model.rules = settings.rules;
     model.numerics = settings.numerics;
+    model.equalities = settings.equalities;
+    model.allow_hessian_growth = settings.allow_hessian_growth;
+    model.deadline = start.checked_add(settings.time_limit);
     model.set_cones(problem.cones.clone());
     let before = size(&model);
     let mut stats = Stats {
@@ -112,6 +115,9 @@ fn presolve_owned(
             time: settings.time_limit.saturating_sub(start.elapsed()),
             fill: settings.substitution_fill,
             sparsify: settings.rules.sparsification,
+            progress: settings.progress,
+            propagation: settings.propagation,
+            sparsification: settings.sparsification,
         },
         executor,
     );

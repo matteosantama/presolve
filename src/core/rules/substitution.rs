@@ -10,19 +10,29 @@ use crate::{
 use std::time::Instant;
 
 impl Model {
-    /// A bounded extension of doubleton substitution. A free pivot absent
-    /// from P removes its equation without adding bounds or Hessian entries.
+    /// Equality substitution with configurable structural and work limits.
+    /// Retain the largest-magnitude pivot requirement to avoid amplification.
     pub fn short_equalities(&mut self, max_fill: usize, deadline: Instant) {
-        let mut work = self.a.nnz().saturating_mul(2);
+        let options = self.equalities;
+        let mut work = options.work_limit.resolve(self.a.nnz().saturating_mul(2));
         for i in self.queues.short_equalities.take_round() {
             if work == 0 || Instant::now() >= deadline {
-                break;
+                if matches!(options.work_limit, crate::settings::WorkLimit::Default) {
+                    break;
+                }
+                // A later cycle may have a fresh work allowance.
+                self.queues.short_equalities.push(i);
+                continue;
             }
-            if !matches!(self.rows[i], RowDomain::Linear(b) if b.equality()) {
+            let RowDomain::Linear(bounds) = self.rows[i] else {
+                continue;
+            };
+            if !bounds.equality() {
                 continue;
             }
             let row = self.a.row(i);
-            if !(3..=8).contains(&row.len()) {
+            let length = row.len();
+            if length < 3 || length > options.max_row_length {
                 continue;
             }
             let largest = row.iter().map(|(_, a)| a.abs()).fold(0.0, f64::max);
@@ -30,30 +40,49 @@ impl Model {
                 .iter()
                 .filter_map(|(j, a)| {
                     let degree = self.a.column(j).len();
-                    (self.bounds[j] == Bounds::FREE
-                        && self.objective.p.column(j).is_empty()
-                        && (2..=8).contains(&degree)
+                    ((!options.require_free_variable || self.bounds[j] == Bounds::FREE)
+                        && (!options.require_linear_variable
+                            || self.objective.p.column(j).is_empty())
+                        && degree >= options.min_column_length
+                        && degree <= options.max_column_length
                         && a.abs() == largest)
-                        .then_some((degree, j))
+                        .then_some((self.bounds[j] != Bounds::FREE, degree, j))
                 })
                 .min();
-            let Some((degree, j)) = pivot else { continue };
-            // Charge for merging full target rows, not just the small pivot.
+            let Some((_, degree, j)) = pivot else {
+                continue;
+            };
             let cost = self
                 .a
                 .column(j)
                 .iter()
-                .fold(row.len() * degree, |cost, (k, _)| {
+                .fold(length.saturating_mul(degree), |cost, (k, _)| {
                     cost.saturating_add(self.a.row(k).len())
                 });
             if cost > work {
+                if !matches!(options.work_limit, crate::settings::WorkLimit::Default) {
+                    self.queues.short_equalities.push(i);
+                }
                 continue;
             }
             work -= cost;
-            // The removed row and column pay for at most this much fill.
-            // P is unchanged, so this also prevents a net increase in A + P.
-            let fill = max_fill.min(row.len() + degree - 1);
-            self.substitute(i, j, Bounds::FREE, fill);
+            let effective = if self.bounds[j] == Bounds::FREE {
+                Bounds::FREE
+            } else {
+                let implied = self.singleton_range(i, j, self.a.get(i, j), bounds.lower);
+                self.non_implied_bounds(j, implied)
+            };
+            let fill = if options.preserve_nonzeros {
+                let removed = degree.saturating_add(if effective == Bounds::FREE {
+                    length - 1
+                } else {
+                    0
+                });
+                max_fill.min(removed)
+            } else {
+                max_fill
+            };
+            self.substitute(i, j, effective, fill);
         }
     }
 
@@ -102,6 +131,9 @@ impl Model {
             }
         }
         for j in self.queues.singleton_columns.take_round() {
+            if self.deadline.is_some_and(|d| Instant::now() >= d) {
+                break;
+            }
             if !self.alive[j] {
                 continue;
             }
@@ -172,6 +204,9 @@ impl Model {
 
     pub fn doubleton_equalities(&mut self, max_fill: usize) {
         for i in self.queues.doubleton_rows.take_round() {
+            if self.deadline.is_some_and(|d| Instant::now() >= d) {
+                break;
+            }
             if !matches!(self.rows[i],RowDomain::Linear(b) if b.equality()) {
                 continue;
             }
@@ -208,7 +243,7 @@ impl Model {
                 (k, j, a / b)
             };
             // Rust has no CSR shift limit; max_fill bounds newly allocated
-            // coefficients in A and P; P must also have no net increase. Try the
+            // coefficients in A and P; Hessian growth has a separate policy. Try the
             // other pivot if fill or arithmetic makes the preferred direction unsuitable.
             if !ratio.is_finite() || !(1e-7..=1e7).contains(&ratio.abs()) {
                 continue;

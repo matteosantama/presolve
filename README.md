@@ -55,7 +55,7 @@ from fixing a variable themselves.
 | Bounds and optimality | `dual_fixing` | Use objective derivatives and unlocked directions to eliminate variables. |
 | Substitution | `singleton_columns` | Eliminate a variable occurring in one linear row. |
 | Substitution | `doubleton_equalities` | Eliminate one variable from a two-variable equality. |
-| Substitution | `short_equalities` | Eliminate a free variable from an equality with 3–8 nonzeros. |
+| Substitution | `short_equalities` | Substitute from equalities under configurable candidate and fill limits. |
 | Parallel structure | `parallel_rows` | Merge proportional linear constraints. |
 | Parallel structure | `parallel_columns` | Aggregate interchangeable variables or exploit objective dominance. |
 | Matrix sparsity | `sparsification` | Cancel shared coefficients between linear rows. |
@@ -160,7 +160,9 @@ c₀′ = c₀ + cᵀd + ½ dᵀP d
 Bounds on an eliminated variable that are not proved implied become a linear
 row on the remaining variables. Thus a substitution may remove a column while
 retaining a transformed row. All these rules respect `substitution_fill`, reject
-nonfinite arithmetic, and forbid a net increase in Hessian nonzeros.
+nonfinite arithmetic, and forbid a net increase in Hessian nonzeros unless
+`allow_hessian_growth` is enabled. `substitution_fill = usize::MAX` removes the
+allocation cap; it does not by itself allow net Hessian growth.
 Sources: [substitution.rs](src/core/rules/substitution.rs),
 [model.rs](src/core/model.rs), [objective.rs](src/core/objective.rs).
 
@@ -170,7 +172,7 @@ has at least two nonzeros.
 
 - In an equality, substitute the variable after discarding bounds implied by
   the equality and the other variables' bounds. If both bound sides remain,
-  defer to the doubleton rule. A variable appearing in `P` is also deferred if
+  defer to doubleton or generalized equality substitution. A variable appearing in `P` is also deferred if
   its coefficient is smaller in magnitude than another coefficient in the row.
 - In an inequality or ranged row, the variable must be absent from `P`. Its
   linear cost selects a preferred finite row side: lower when `cⱼ/aⱼ > 0`,
@@ -191,13 +193,18 @@ substitution ratio, then the shorter column. The chosen ratio magnitude must
 lie in `[1e-7, 1e7]`. For a purely linear pair, the other pivot is tried if the
 preferred substitution fails its fill or arithmetic checks.
 
-**Short equalities — `short_equalities`.** Extend equality substitution to rows
-with 3–8 nonzeros. The pivot must be free, absent from `P`, occur in 2–8 constraint
-rows, and have a coefficient of maximum magnitude in the equality. Among
-candidates, prefer the shorter column. The rule removes the pivot and its
-equality without introducing a bound row or changing `P`. Its fill allowance is
-further capped by the removed row and column, preventing a net increase in
-constraint nonzeros, and exploration has a separate work budget and deadline.
+**Short equalities — `short_equalities`.** By default, consider rows with 3–8
+nonzeros and a free pivot absent from `P`, appearing in 2–8 constraint rows.
+The pivot must have maximum coefficient magnitude in the equality. Prefer free
+variables, then shorter columns. Default substitutions remove both the variable
+and equality, leave `P` unchanged, and cap fill by the removed entries.
+
+`settings.equalities` can widen the row and column limits, admit bounded and
+quadratic pivots, remove the no-growth restriction on total constraint and
+Hessian nonzeros, and change the work allowance. Necessary bounds on a bounded
+pivot become a ranged row; bounds proved implied are omitted. The largest-pivot
+and finite-arithmetic checks remain in effect. The historical rule name is
+retained even when configured to process long equalities.
 
 ### Parallel structure
 
@@ -281,7 +288,8 @@ zero-head face reduction in this implementation.
 
 ## Scheduling and numerical controls
 
-The [scheduler](src/core/schedule.rs) runs rules in the following order:
+The [scheduler](src/core/schedule.rs) runs rules in the following order. The
+thresholds below describe the default configuration:
 
 1. **Cleanup to stability:** fixed variables, cones, empty columns, simple dual
    fixing, singleton rows, empty rows, and cones again.
@@ -297,12 +305,27 @@ The [scheduler](src/core/schedule.rs) runs rules in the following order:
    variable-bound removal, provided the run has not reported a time limit.
 
 The progress threshold and bounded searches mean presolve need not exhaust every
-possible reduction. For this measure, Hessian off-diagonal entries count twice.
+possible reduction. For this measure, Hessian off-diagonal entries count twice. `Progress::AnyChange`
+continues fast phases and full cycles after any model edit, including bound-only
+changes or substitutions that increase nonzeros. Rule-specific limits and the
+time budget can still prevent further reductions.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `time_limit` | 60 seconds | Per-call soft budget including model construction and export preparation, excluding `Presolver` initialization; an in-progress transaction can finish before the limit is observed. |
-| `substitution_fill` | `64` | Maximum new constraint and Hessian coefficients per equality substitution, with a separate prohibition on net Hessian growth. |
+| `substitution_fill` | `64` | Maximum new constraint and Hessian coefficients per substitution; `usize::MAX` removes the cap. |
+| `allow_hessian_growth` | `false` | Permit a net increase in Hessian nonzeros; the fill cap still applies. |
+| `equalities.max_row_length` | `8` | Maximum equality row length for the generalized substitution rule. |
+| `equalities.min_column_length` / `max_column_length` | `2` / `8` | Candidate pivot column degree range; use `1` / `usize::MAX` to admit all nonempty columns. |
+| `equalities.require_free_variable` | `true` | Require a variable with no explicit bounds. |
+| `equalities.require_linear_variable` | `true` | Require a pivot absent from the Hessian. |
+| `equalities.preserve_nonzeros` | `true` | Cap new coefficients by removed constraint entries, preventing net growth in total constraint and Hessian nonzeros. |
+| `equalities.work_limit` | `Default` | Estimated entry visits per pass; default is twice the current constraint nonzeros. |
+| `propagation.additional_rounds` | `3` | Extra propagation rounds after the initial pass; `usize::MAX` removes the cap. |
+| `propagation.work_limit` | `Default` | Work allowance across extra rounds; default is `max(constraint nonzeros / 4, 256)`. |
+| `progress` | `Nonzeros { minimum_reduction: 0.05 }` | Fractional nonzero decrease required to continue, or `AnyChange` to continue after any edit. |
+| `sparsification.allow_auxiliary_variables` | `true` | Allow inequality references that introduce activity variables; `false` uses equality references only. |
+| `sparsification.work_limit` | `Default` | Work allowance per pass; default is `max(8 * (constraint nonzeros + bound entries), 1024)`. |
 | `threads` | `1` | Thread count for fingerprinting and sorting: `1` is serial, `0` lets Rayon select automatically. |
 | `numerics.feasibility` | `1e-9` | Relative feasibility margin for separation checks; it does not round bounds or cone coordinates to zero. |
 | `numerics.parallel` | `1e-12` | Relative coefficient tolerance for parallel candidates; operations requiring exact relations still enforce them. |
@@ -311,8 +334,11 @@ possible reduction. For this measure, Hessian off-diagonal entries count twice.
 For propagation to improve an already finite bound, the gain must exceed
 `max(1e4 * feasibility, 0.01 * abs(old_bound))`, except when the new bound exactly
 meets the opposite bound. Singleton-row bound extraction does not use this gain
-filter or `huge_bound`. Rule-specific scaling and work limits are currently
-internal constants.
+filter or `huge_bound`. Numerical scaling and cancellation safeguards remain
+internal constants. Each `WorkLimit` accepts `Default`, `Entries(n)`, or
+`Unlimited`. These work budgets are independent of `time_limit`. The time limit
+is soft: matrix preparation, an in-progress operation, and result packing may
+extend elapsed time beyond it; it is not a memory limit.
 
 Select rule families through `Settings`, for example:
 
@@ -330,6 +356,39 @@ let settings = Settings {
     ..Settings::default()
 };
 ```
+
+### Aggressive dimensional reduction
+
+Use the measured aggressive preset when fewer variables and constraints matter
+more than matrix sparsity:
+
+```rust
+use presolve::Settings;
+use std::time::Duration;
+
+let settings = Settings::aggressive(Duration::from_secs(2));
+```
+
+This enables unrestricted substitution fill and Hessian growth, admits bounded
+and quadratic equality pivots, continues after any model edit, and removes the
+extra propagation round and work caps. It uses equality-only sparsification and
+keeps the default numerical tolerances and one-thread execution.
+
+Candidate equality rows and pivot columns are limited to 16 entries. These are
+search limits, not fill limits: a selected substitution can introduce any number
+of coefficients. In the Netlib and Maros–Mészáros comparison, this restriction
+produced more dimensional reduction within the budget than admitting every
+candidate. Set `equalities.max_row_length` and `equalities.max_column_length` to
+`usize::MAX` to remove these limits too. All preset fields remain editable.
+
+The preset is a starting point, not a guarantee of the smallest model on every
+problem. Read [the benchmark comparison](benchmark/AGGRESSIVE.md) for measured
+reductions, runtime, fill growth, and cases reaching the time budget.
+
+Equality substitution also rejects near-cancellation when a nonzero updated
+coefficient is smaller than `1e-10` times the larger contributing term. This
+prevents roundoff from becoming a later pivot. Exact zeros remain valid; rejected
+substitutions leave the model unchanged.
 
 ### Optional parallel execution
 
@@ -376,7 +435,13 @@ estimates use constraint nonzeros for rows and constraint plus Hessian nonzeros
 for columns.
 
 The benchmark accepts `--threads N` and `--pool-mode cold|reused` for both time
-and size runs. For example, to compare repeated-call performance:
+and size runs. `--preset default|fill|aggressive|unrestricted` selects the baseline,
+unrestricted fill with baseline searches, the measured aggressive configuration,
+or that configuration without equality length limits. Use `--time-limit-ms N`,
+`--equality-row-limit N`, `--equality-column-limit N`, and
+`--sparsification all|equalities|off` to override the preset. Metadata records the
+complete resulting settings, and measurements include finite variable-bound
+side counts. For example, to compare repeated-call performance:
 
 ```sh
 cargo run --release -p benchmark -- run time --name serial --problem QAP12 --rule all --trials 5 --pool-mode reused
