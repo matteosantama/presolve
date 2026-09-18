@@ -83,6 +83,7 @@ impl Extreme {
         }
     }
 
+    #[inline]
     pub fn value(self) -> Option<f64> {
         (self.infinite == 0 && self.sum.is_finite()).then_some(self.sum)
     }
@@ -92,6 +93,7 @@ impl Extreme {
     /// because of cancellation, `recompute` supplies the residual directly,
     /// but only when this term is the sole infinite one: any other infinite
     /// contribution keeps the residual infinite.
+    #[inline]
     pub fn implied(
         self,
         term: f64,
@@ -108,6 +110,7 @@ impl Extreme {
             .map(|v| (rhs - v) / a)
     }
 
+    #[inline]
     pub fn excluding(self, term: f64) -> Option<f64> {
         if term.is_finite() {
             let residual = self.sum - term;
@@ -144,6 +147,7 @@ impl Activity {
     /// bounds `b`, as (from the row's lower side, from its upper side), each
     /// only when that side is finite. `residual` recomputes the activity
     /// without the variable when the cached extremes cannot exclude its term.
+    #[inline]
     pub fn implied(
         self,
         a: f64,
@@ -173,6 +177,7 @@ impl Activity {
 
     /// The bound implied for the variable's `side` by one row, when that
     /// row's relevant extreme excludes the variable's own term.
+    #[inline]
     pub fn implied_side(
         self,
         a: f64,
@@ -208,6 +213,7 @@ impl Activity {
         let (new_min, new_max) = Self::terms(a, new);
         self.min.replace(old_min, new_min) && self.max.replace(old_max, new_max)
     }
+    #[inline]
     pub fn terms(a: f64, b: Bounds) -> (f64, f64) {
         if a > 0.0 {
             (a * b.lower, a * b.upper)

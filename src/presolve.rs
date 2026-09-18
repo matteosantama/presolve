@@ -290,18 +290,19 @@ fn inverse(map: &[usize], len: usize) -> Vec<usize> {
     out
 }
 
+/// The recovery map takes the survivor index vectors and the model's tape.
 fn build_postsolve(
     model: &mut Model,
     original: &mut Problem,
-    survivors: &Survivors,
+    survivors: Survivors,
     before: Size,
-) -> Postsolve {
+) -> (Postsolve, Vec<Cone>) {
     let input_linear = std::mem::take(&mut original.linear_rows);
     let input_conic = std::mem::take(&mut original.conic_rows);
     let coordinates = Coordinates {
-        compact_to_stable_columns: Arc::new(survivors.columns.clone()),
-        compact_to_stable_linear_rows: survivors.linear_rows.clone(),
-        compact_to_stable_conic_rows: survivors.conic_rows.clone(),
+        compact_to_stable_columns: Arc::new(survivors.columns),
+        compact_to_stable_linear_rows: survivors.linear_rows,
+        compact_to_stable_conic_rows: survivors.conic_rows,
     };
     // Surviving cone coordinates keep their input position for slack copies.
     let original_positions = if input_conic.is_empty() {
@@ -315,7 +316,7 @@ fn build_postsolve(
         .enumerate()
         .map(|(at, &i)| (original_positions[i], at))
         .collect();
-    Postsolve {
+    let postsolve = Postsolve {
         total_columns: model.bounds.len(),
         total_rows: model.rows.len(),
         original_columns: before.variables,
@@ -324,7 +325,8 @@ fn build_postsolve(
         coordinates,
         input_linear,
         input_conic,
-    }
+    };
+    (postsolve, survivors.cones)
 }
 
 /// Compact the working model's objective, bounds, and domains into a problem
@@ -410,10 +412,11 @@ fn compact_problem(
 
 fn pack(mut model: Model, mut original: Problem, before: Size) -> Outcome {
     let survivors = survivors(&model);
-    let postsolve = build_postsolve(&mut model, &mut original, &survivors, before);
-    if survivors.columns.is_empty()
-        && survivors.linear_rows.is_empty()
-        && survivors.conic_rows.is_empty()
+    let (postsolve, cones) = build_postsolve(&mut model, &mut original, survivors, before);
+    let coordinates = &postsolve.coordinates;
+    if coordinates.compact_to_stable_columns.is_empty()
+        && coordinates.compact_to_stable_linear_rows.is_empty()
+        && coordinates.compact_to_stable_conic_rows.is_empty()
     {
         return Outcome::Solved(postsolve.recover_solution(SolutionRef {
             x: &[],
@@ -423,13 +426,7 @@ fn pack(mut model: Model, mut original: Problem, before: Size) -> Outcome {
             conic_slack: &[],
         }));
     }
-    let problem = compact_problem(
-        model,
-        original,
-        &postsolve.coordinates,
-        survivors.cones,
-        before,
-    );
+    let problem = compact_problem(model, original, &postsolve.coordinates, cones, before);
     Outcome::Reduced(Box::new(ReducedProblem { problem, postsolve }))
 }
 
