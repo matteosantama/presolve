@@ -203,7 +203,7 @@ and off by default: in the Netlib and Maros–Mészáros comparison it removed
 1481 variables and 474 rows (MAROS-R7 860 columns, 80BAU3B 377 columns and 300
 rows) but its single pass added about 6% to the corpus presolve time, mostly
 on problems where it proves nothing. See
-`benchmark/results/new-rules-20260917/REPORT.md`.
+`docs/benchmarks/new-rules-20260917/REPORT.md`.
 Source: [dual_propagation.rs](src/core/rules/dual_propagation.rs).
 
 ### Substitution
@@ -347,7 +347,7 @@ The rule is enabled by `Settings::aggressive`, with the general search, and
 off by default: in the Netlib and Maros–Mészáros comparison the identical-
 support test removed 1638 variables (STANDATA, STANDGUB and QSTANDAT lose 324
 each, WOODW 242) but added about 2% to the corpus presolve time. See
-`benchmark/results/new-rules-20260917/REPORT.md`.
+`docs/benchmarks/new-rules-20260917/REPORT.md`.
 Source: [dominated_columns.rs](src/core/rules/dominated_columns.rs).
 
 ### Matrix sparsity
