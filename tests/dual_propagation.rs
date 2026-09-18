@@ -2,7 +2,7 @@ use presolve::{
     Outcome, Presolver, Settings,
     matrix::CscMatrix,
     postsolve::Solution,
-    problem::{Bounds, Constraint, ProblemData},
+    problem::{Bounds, Constraint, Problem},
     settings::Rules,
 };
 
@@ -18,12 +18,14 @@ fn only_dual_propagation() -> Settings {
 
 /// min -x subject to x - y <= 0, x free, 0 <= y <= 5.
 /// The free column forces y_0 = -1, so the row is tight at every optimum.
-fn tight_row() -> ProblemData {
-    ProblemData {
+fn tight_row() -> Problem {
+    Problem {
         p: None,
         c: vec![-1., 0.],
         objective_constant: 0.,
-        a: CscMatrix::from_triplets(1, 2, vec![0, 0], vec![0, 1], vec![1., -1.]).unwrap(),
+        a: CscMatrix::from_triplets(1, 2, vec![0, 0], vec![0, 1], vec![1., -1.])
+            .unwrap()
+            .into(),
         rows: vec![Constraint::Linear(Bounds {
             lower: f64::NEG_INFINITY,
             upper: 0.,
@@ -42,12 +44,14 @@ fn tight_row() -> ProblemData {
 /// min x + w/2 subject to x + w >= 1, x >= 0, w free.
 /// The free column forces y_0 = 1/2, so z_x = 1/2 > 0 fixes x at its bound
 /// although the row locks x downward.
-fn fixed_column() -> ProblemData {
-    ProblemData {
+fn fixed_column() -> Problem {
+    Problem {
         p: None,
         c: vec![1., 0.5],
         objective_constant: 0.,
-        a: CscMatrix::from_triplets(1, 2, vec![0, 0], vec![0, 1], vec![1., 1.]).unwrap(),
+        a: CscMatrix::from_triplets(1, 2, vec![0, 0], vec![0, 1], vec![1., 1.])
+            .unwrap()
+            .into(),
         rows: vec![Constraint::Linear(Bounds {
             lower: 1.,
             upper: f64::INFINITY,
@@ -67,13 +71,13 @@ fn fixed_column() -> ProblemData {
 fn strictly_negative_multiplier_makes_the_row_tight_and_fixes_its_bound() {
     let result = Presolver::new(only_dual_propagation())
         .unwrap()
-        .presolve(presolve::Problem::from(tight_row()));
+        .presolve(tight_row());
     let Outcome::Reduced(r) = result.outcome else {
         panic!("expected a reduced problem")
     };
     // y_0 = -1 makes the row tight; z_y = y_0 < 0 also fixes y at 5.
     assert_eq!(r.problem.variable_count(), 1);
-    assert_eq!(r.problem.row_bounds(0), Bounds::fixed(5.));
+    assert_eq!(r.problem.rows[0], Constraint::Linear(Bounds::fixed(5.)));
     // The solver's equality multiplier is the original upper-side multiplier.
     let reduced = Solution {
         x: vec![5.],
@@ -92,7 +96,7 @@ fn strictly_negative_multiplier_makes_the_row_tight_and_fixes_its_bound() {
 fn default_pipeline_solves_the_tight_row_problem() {
     let result = Presolver::new(Settings::default())
         .unwrap()
-        .presolve(presolve::Problem::from(tight_row()));
+        .presolve(tight_row());
     let Outcome::Solved(solution) = result.outcome else {
         panic!("expected a solved problem")
     };
@@ -107,13 +111,13 @@ fn default_pipeline_solves_the_tight_row_problem() {
 fn strictly_positive_reduced_cost_fixes_a_locked_column() {
     let result = Presolver::new(only_dual_propagation())
         .unwrap()
-        .presolve(presolve::Problem::from(fixed_column()));
+        .presolve(fixed_column());
     let Outcome::Reduced(r) = result.outcome else {
         panic!("expected a reduced problem")
     };
     // y_0 = 1/2 > 0 makes the row tight and z_x = 1/2 > 0 fixes x at zero.
     assert_eq!(r.problem.variable_count(), 1);
-    assert_eq!(r.problem.row_bounds(0), Bounds::fixed(1.));
+    assert_eq!(r.problem.rows[0], Constraint::Linear(Bounds::fixed(1.)));
     let reduced = Solution {
         x: vec![1.],
         y: vec![0.5],
@@ -131,11 +135,13 @@ fn strictly_positive_reduced_cost_fixes_a_locked_column() {
 fn dual_infeasible_systems_produce_no_reductions() {
     // min -x - y subject to x - y <= 0, x, y >= 0 is unbounded. The
     // multiplier bounds contradict, so the pass must not tighten anything.
-    let problem = ProblemData {
+    let problem = Problem {
         p: None,
         c: vec![-1., -1.],
         objective_constant: 0.,
-        a: CscMatrix::from_triplets(1, 2, vec![0, 0], vec![0, 1], vec![1., -1.]).unwrap(),
+        a: CscMatrix::from_triplets(1, 2, vec![0, 0], vec![0, 1], vec![1., -1.])
+            .unwrap()
+            .into(),
         rows: vec![Constraint::Linear(Bounds {
             lower: f64::NEG_INFINITY,
             upper: 0.,
@@ -151,7 +157,7 @@ fn dual_infeasible_systems_produce_no_reductions() {
     };
     let result = Presolver::new(only_dual_propagation())
         .unwrap()
-        .presolve(presolve::Problem::from(problem));
+        .presolve(problem);
     assert!(matches!(result.outcome, Outcome::Unchanged(_)));
 }
 
@@ -160,9 +166,13 @@ fn quadratic_columns_do_not_contribute_dual_rows() {
     // The same data as the tight row, but x carries curvature. Its reduced
     // cost depends on x, so nothing can be proved and the problem is unchanged.
     let mut problem = tight_row();
-    problem.p = Some(CscMatrix::from_triplets(2, 2, vec![0], vec![0], vec![1.]).unwrap());
+    problem.p = Some(
+        CscMatrix::from_triplets(2, 2, vec![0], vec![0], vec![1.])
+            .unwrap()
+            .into(),
+    );
     let result = Presolver::new(only_dual_propagation())
         .unwrap()
-        .presolve(presolve::Problem::from(problem));
+        .presolve(problem);
     assert!(matches!(result.outcome, Outcome::Unchanged(_)));
 }

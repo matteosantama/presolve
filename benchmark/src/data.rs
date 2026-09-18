@@ -4,7 +4,7 @@ use mps::Parser;
 use mps::types::{BoundType, ObjectiveSense, RowType, WideLine};
 use presolve::{
     matrix::CscMatrix,
-    problem::{Bounds, Constraint, ProblemData},
+    problem::{Bounds, Constraint, Problem},
 };
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -30,7 +30,7 @@ pub fn problems(suite: &str) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-pub fn read(path: &Path) -> Result<ProblemData> {
+pub fn read(path: &Path) -> Result<Problem> {
     let mut text = String::new();
     GzDecoder::new(File::open(path)?).read_to_string(&mut text)?;
     parse(&text).map_err(|e| format!("{}: {e}", path.display()).into())
@@ -46,7 +46,7 @@ fn first_set<'a>(lines: &'a [WideLine<'a, f64>]) -> impl Iterator<Item = (&'a st
         .map(|pair| (pair.row_name, pair.value))
 }
 
-fn parse(text: &str) -> Result<ProblemData> {
+fn parse(text: &str) -> Result<Problem> {
     let source = Parser::<f64>::parse(text).map_err(|e| e.to_string())?;
     let objective = source
         .objective_name
@@ -188,15 +188,15 @@ fn parse(text: &str) -> Result<ProblemData> {
             pj.push(j);
             pv.push(value);
         }
-        Some(CscMatrix::from_triplets(n, n, pi, pj, pv)?)
+        Some(CscMatrix::from_triplets(n, n, pi, pj, pv)?.into())
     } else {
         None
     };
-    Ok(ProblemData {
+    Ok(Problem {
         p,
         c,
         objective_constant,
-        a: CscMatrix::from_triplets(rows.len(), n, ai, aj, av)?,
+        a: CscMatrix::from_triplets(rows.len(), n, ai, aj, av)?.into(),
         rows: bounds.into_iter().map(Constraint::Linear).collect(),
         variable_bounds,
         cones: vec![],

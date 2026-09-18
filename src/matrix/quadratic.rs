@@ -1,7 +1,12 @@
 //! Lazy quadratic export. The working Hessian remains owned until requested.
+use crate::matrix::CscMatrix;
 use crate::matrix::sparse::SymmetricMatrix;
-use crate::matrix::{CscMatrix, CscMatrixRef};
 use std::sync::Arc;
+
+/// Upper triangle of a symmetric Hessian, in either the caller's CSC form or a
+/// reduced model's working storage. Packing to CSC happens only on request.
+#[derive(Clone, Debug)]
+pub struct QuadraticMatrix(pub(crate) Quadratic);
 
 #[derive(Clone, Debug)]
 pub(crate) enum Quadratic {
@@ -14,27 +19,37 @@ pub(crate) struct SparseQuadratic {
     compact_to_stable_columns: Arc<Vec<usize>>,
     stable_to_compact_columns: Arc<Vec<usize>>,
 }
-/// Upper-triangular access independent of the reduced Hessian's storage.
-#[derive(Clone, Copy)]
-pub struct QuadraticRef<'a> {
-    inner: &'a Quadratic,
+impl From<CscMatrix> for QuadraticMatrix {
+    fn from(matrix: CscMatrix) -> Self {
+        Self(Quadratic::Csc(matrix))
+    }
 }
-impl<'a> QuadraticRef<'a> {
-    pub fn columns(self) -> usize {
-        match self.inner {
+impl QuadraticMatrix {
+    pub fn columns(&self) -> usize {
+        match &self.0 {
             Quadratic::Csc(p) => p.columns(),
             Quadratic::Sparse(p) => p.compact_to_stable_columns.len(),
         }
     }
     /// Borrow existing CSC buffers if available; this never triggers packing.
-    pub fn as_csc(self) -> Option<CscMatrixRef<'a>> {
-        match self.inner {
-            Quadratic::Csc(p) => Some(p.as_ref()),
+    pub fn as_csc(&self) -> Option<&CscMatrix> {
+        match &self.0 {
+            Quadratic::Csc(p) => Some(p),
             Quadratic::Sparse(_) => None,
         }
     }
-    pub fn column(self, j: usize) -> impl Iterator<Item = (usize, f64)> + 'a {
-        let (csc, sparse) = match self.inner {
+    /// Upper-triangular column `j`, independent of the storage form.
+    pub fn column(&self, j: usize) -> impl Iterator<Item = (usize, f64)> + '_ {
+        self.0.column(j)
+    }
+    /// Move existing CSC buffers or pack the working storage once.
+    pub fn into_csc(self) -> CscMatrix {
+        self.0.into_csc()
+    }
+}
+impl Quadratic {
+    fn column(&self, j: usize) -> impl Iterator<Item = (usize, f64)> + '_ {
+        let (csc, sparse) = match self {
             Quadratic::Csc(p) => (Some(p.as_ref()), None),
             Quadratic::Sparse(p) => (None, Some(p.as_ref())),
         };
@@ -49,11 +64,6 @@ impl<'a> QuadraticRef<'a> {
                         (row <= j).then_some((row, v))
                     })
             }))
-    }
-}
-impl Quadratic {
-    pub fn as_ref(&self) -> QuadraticRef<'_> {
-        QuadraticRef { inner: self }
     }
     pub fn from_sparse(
         matrix: SymmetricMatrix,
@@ -71,9 +81,10 @@ impl Quadratic {
             Self::Csc(p) => {
                 SymmetricMatrix::from_upper_columns(p.columns(), |j| p.as_ref().column(j))
             }
-            Self::Sparse(_) => {
-                let p = self.as_ref();
-                SymmetricMatrix::from_upper_columns(p.columns(), |j| p.column(j))
+            Self::Sparse(p) => {
+                SymmetricMatrix::from_upper_columns(p.compact_to_stable_columns.len(), |j| {
+                    self.column(j)
+                })
             }
         }
     }

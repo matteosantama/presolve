@@ -18,13 +18,13 @@
 //! ```
 //! use ::presolve::{Outcome, Presolver, Problem};
 //! use ::presolve::matrix::CscMatrix;
-//! use ::presolve::problem::{Bounds, ProblemData};
-//! let problem = ProblemData {
+//! use ::presolve::problem::Bounds;
+//! let problem = Problem {
 //!     p: None, c: vec![1.0], objective_constant: 0.0,
-//!     a: CscMatrix::zeros(0, 1)?, rows: vec![],
+//!     a: CscMatrix::zeros(0, 1)?.into(), rows: vec![],
 //!     variable_bounds: vec![Bounds { lower: 2.0, upper: 4.0 }], cones: vec![],
 //! };
-//! let result = Presolver::default().presolve(Problem::from(problem));
+//! let result = Presolver::default().presolve(problem);
 //! if let Outcome::Solved(solution) = result.outcome {
 //!     assert_eq!(solution.x, [2.0]);
 //!     assert_eq!(solution.z, [1.0]);

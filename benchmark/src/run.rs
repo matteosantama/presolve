@@ -2,7 +2,7 @@ use crate::results::{Case, Measurement, Metadata, RunWriter};
 use crate::{Kind, PoolMode, Preset, Result, Selection, SparsificationMode, Tuning, data};
 use presolve::{
     Presolver,
-    problem::ProblemData,
+    problem::Problem,
     result::Outcome,
     settings::{Rules, Settings},
 };
@@ -124,7 +124,7 @@ fn bound_sides(bounds: impl IntoIterator<Item = presolve::problem::Bounds>) -> u
 }
 
 pub fn measure(
-    input: ProblemData,
+    input: Problem,
     settings: &Settings,
     timed: bool,
     mode: PoolMode,
@@ -133,7 +133,7 @@ pub fn measure(
     let ready = if mode == PoolMode::Reused {
         let presolver = Presolver::new(settings.clone())?;
         if timed {
-            drop(presolver.presolve(presolve::Problem::from(input.clone())));
+            drop(presolver.presolve(input.clone()));
         }
         Some(presolver)
     } else {
@@ -147,7 +147,7 @@ pub fn measure(
         Some(presolver) => presolver,
         None => Presolver::new(black_box(settings).clone())?,
     };
-    let result = presolver.presolve(presolve::Problem::from(input));
+    let result = presolver.presolve(input);
     let elapsed_ns = start.map(|start| start.elapsed().as_nanos().min(u64::MAX as u128) as u64);
     let after_bound_sides = match &result.outcome {
         Outcome::Unchanged(p) => Some(bound_sides(

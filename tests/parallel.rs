@@ -2,7 +2,7 @@ use presolve::{
     Outcome, Presolver, Settings,
     matrix::CscMatrix,
     postsolve::Solution,
-    problem::{Bounds, Constraint, ProblemData},
+    problem::{Bounds, Constraint, Problem},
     result::PresolveResult,
     settings::Rules,
 };
@@ -11,7 +11,7 @@ const WIDTH: usize = 8;
 // 32,768 constraint entries exercise the parallel path, including row scans.
 const BLOCKS: usize = 2048;
 
-fn problem(blocks: usize, quadratic: bool) -> ProblemData {
+fn problem(blocks: usize, quadratic: bool) -> Problem {
     let n = WIDTH * blocks;
     let mut ai = Vec::new();
     let mut aj = Vec::new();
@@ -31,11 +31,13 @@ fn problem(blocks: usize, quadratic: bool) -> ProblemData {
         }
     }
     let pv = vec![1.; pi.len()];
-    ProblemData {
-        p: quadratic.then(|| CscMatrix::from_triplets(n, n, pi, pj, pv).unwrap()),
+    Problem {
+        p: quadratic.then(|| CscMatrix::from_triplets(n, n, pi, pj, pv).unwrap().into()),
         c: vec![-2.; n],
         objective_constant: 2. * blocks as f64,
-        a: CscMatrix::from_triplets(2 * blocks, n, ai, aj, av).unwrap(),
+        a: CscMatrix::from_triplets(2 * blocks, n, ai, aj, av)
+            .unwrap()
+            .into(),
         rows: (0..blocks)
             .flat_map(|_| {
                 [
@@ -61,14 +63,14 @@ fn problem(blocks: usize, quadratic: bool) -> ProblemData {
     }
 }
 
-fn run(input: &ProblemData, rules: Rules, threads: usize) -> PresolveResult {
+fn run(input: &Problem, rules: Rules, threads: usize) -> PresolveResult {
     Presolver::new(Settings {
         rules,
         threads,
         ..Settings::default()
     })
     .unwrap()
-    .presolve(presolve::Problem::from(input.clone()))
+    .presolve(input.clone())
 }
 
 fn same_solution(a: &Solution, b: &Solution) {
@@ -79,7 +81,7 @@ fn same_solution(a: &Solution, b: &Solution) {
     assert_eq!(a.conic_slack, b.conic_slack);
 }
 
-fn same_result(a: PresolveResult, b: PresolveResult, input: &ProblemData) {
+fn same_result(a: PresolveResult, b: PresolveResult, input: &Problem) {
     assert!(!a.stats.time_limit_reached && !b.stats.time_limit_reached);
     assert_eq!(a.stats.before, b.stats.before);
     assert_eq!(a.stats.after, b.stats.after);
@@ -102,8 +104,11 @@ fn same_result(a: PresolveResult, b: PresolveResult, input: &ProblemData) {
             check_optimum(&recovered);
             let a = a.problem.into_csc();
             let b = b.problem.into_csc();
-            assert_eq!(a.a, b.a);
-            assert_eq!(a.p, b.p);
+            assert_eq!(a.a.as_csc(), b.a.as_csc());
+            assert_eq!(
+                a.p.as_ref().and_then(|p| p.as_csc()),
+                b.p.as_ref().and_then(|p| p.as_csc())
+            );
             assert_eq!(a.c, b.c);
             assert_eq!(a.objective_constant, b.objective_constant);
             assert_eq!(a.rows, b.rows);
@@ -120,7 +125,9 @@ fn same_result(a: PresolveResult, b: PresolveResult, input: &ProblemData) {
             assert_eq!(a.conic_dual, b.conic_dual);
             // Original-coordinate Farkas stationarity and positive contradiction.
             for j in 0..input.c.len() {
-                let value: f64 = column(&input.a, j).map(|(i, v)| v * a.y[i]).sum();
+                let value: f64 = column(input.a.as_csc().unwrap(), j)
+                    .map(|(i, v)| v * a.y[i])
+                    .sum();
                 assert_eq!(value + a.z[j], 0.);
             }
             let contradiction: f64 = input
@@ -142,7 +149,7 @@ fn same_result(a: PresolveResult, b: PresolveResult, input: &ProblemData) {
             assert!(input.c.iter().zip(&a.ray).map(|(c, x)| c * x).sum::<f64>() < 0.);
             let mut activity = vec![0.; input.rows.len()];
             for (j, x) in a.ray.iter().enumerate() {
-                for (i, v) in column(&input.a, j) {
+                for (i, v) in column(input.a.as_csc().unwrap(), j) {
                     activity[i] += v * x;
                 }
             }
@@ -242,11 +249,11 @@ fn reusable_presolver_supports_concurrent_calls_and_independent_results() {
     let large = problem(BLOCKS, true);
     let small = problem(2, true);
     let (first, second) = std::thread::scope(|scope| {
-        let a = scope.spawn(|| presolver.presolve(presolve::Problem::from(large.clone())));
-        let b = scope.spawn(|| presolver.presolve(presolve::Problem::from(small.clone())));
+        let a = scope.spawn(|| presolver.presolve(large.clone()));
+        let b = scope.spawn(|| presolver.presolve(small.clone()));
         (a.join().unwrap(), b.join().unwrap())
     });
-    let third = presolver.presolve(presolve::Problem::from(large.clone()));
+    let third = presolver.presolve(large.clone());
     drop(presolver);
     // Postsolve and reduced storage outlive the executor and all later calls.
     same_result(run(&large, rules, 1), first, &large);
@@ -263,7 +270,7 @@ fn column(matrix: &CscMatrix, j: usize) -> impl Iterator<Item = (usize, f64)> + 
         .zip(matrix.values()[start..end].iter().copied())
 }
 
-fn collided_rows(classes: usize, width: usize, factor: f64) -> ProblemData {
+fn collided_rows(classes: usize, width: usize, factor: f64) -> Problem {
     let m = 1 + 2 * classes;
     let mut ai = Vec::with_capacity(m * width);
     let mut aj = Vec::with_capacity(m * width);
@@ -284,11 +291,13 @@ fn collided_rows(classes: usize, width: usize, factor: f64) -> ProblemData {
             );
         }
     }
-    ProblemData {
+    Problem {
         p: None,
         c: vec![0.; width],
         objective_constant: 0.,
-        a: CscMatrix::from_triplets(m, width, ai, aj, av).unwrap(),
+        a: CscMatrix::from_triplets(m, width, ai, aj, av)
+            .unwrap()
+            .into(),
         rows: vec![
             Constraint::Linear(Bounds {
                 lower: -1.,
@@ -333,10 +342,10 @@ fn hash_collisions_preserve_hidden_classes_with_bounded_comparisons() {
                 );
                 let data = reduced.problem.into_csc();
                 if let Some((a, rows)) = reference.as_ref() {
-                    assert_eq!(&data.a, a);
+                    assert_eq!(data.a.as_csc().unwrap(), a);
                     assert_eq!(&data.rows, rows);
                 } else {
-                    reference = Some((data.a, data.rows));
+                    reference = Some((data.a.into_csc(), data.rows));
                 }
             }
         }
@@ -366,7 +375,7 @@ fn hash_collision_does_not_hide_an_infeasibility_certificate() {
 #[test]
 fn redundant_parallel_row_keeps_warm_start_stationarity_without_tightening() {
     for scale in [1., -2.] {
-        let input = ProblemData {
+        let input = Problem {
             p: None,
             c: vec![2.; 2],
             objective_constant: 0.,
@@ -377,7 +386,8 @@ fn redundant_parallel_row_keeps_warm_start_stationarity_without_tightening() {
                 vec![0, 1, 0, 1],
                 vec![1., 1., scale, scale],
             )
-            .unwrap(),
+            .unwrap()
+            .into(),
             rows: vec![
                 Constraint::Linear(Bounds {
                     lower: 1.,

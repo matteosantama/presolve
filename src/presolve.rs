@@ -1,10 +1,10 @@
 //! Presolve entry point, working-model preparation, and result packing.
 use crate::{
     executor::Executor,
-    matrix::quadratic::Quadratic,
+    matrix::quadratic::{Quadratic, QuadraticMatrix},
     model::{Model, RowDomain, tape::Recovery},
     postsolve::{Coordinates, OriginalMap, Postsolve, PrimalCertificate, SolutionRef},
-    problem::{Bounds, Cone, Constraint, Matrix, Problem, row_indices},
+    problem::{Bounds, Cone, Constraint, ConstraintMatrix, Problem, row_indices},
     result::{Outcome, PresolveResult, ReducedProblem, Size, Stats, UnboundednessCertificate},
     settings::Settings,
 };
@@ -70,6 +70,9 @@ fn presolve_owned(
 ) -> PresolveResult {
     let n = problem.c.len();
     let free_bounds = problem.variable_bounds.is_empty();
+    // The caller's row tags, kept for certificates and the postsolve map
+    // after domains have been deleted.
+    let input_rows = row_indices(&problem.rows);
     let mut model = working_model(&mut problem, settings, start);
     let before = size(&model);
     let mut stats = Stats {
@@ -92,8 +95,8 @@ fn presolve_owned(
             // Domains can have been deleted; use the caller's original row tags.
             let original = OriginalMap {
                 columns: n,
-                linear: &problem.linear_rows,
-                conic: &problem.conic_rows,
+                linear: &input_rows.0,
+                conic: &input_rows.1,
             };
             match certificate.mode {
                 Recovery::PrimalInfeasibility => {
@@ -108,7 +111,7 @@ fn presolve_owned(
                         let ray = original.gather(certificate.point, Vec::new()).x;
                         Outcome::Unbounded(UnboundednessCertificate { point, ray })
                     }
-                    None => finish(model, problem, free_bounds, before, &mut stats),
+                    None => finish(model, problem, input_rows, free_bounds, before, &mut stats),
                 },
                 Recovery::Solution => unreachable!(),
             }
@@ -116,7 +119,7 @@ fn presolve_owned(
         Ok(phases) => {
             stats.parallel_comparisons = phases.parallel_comparisons;
             stats.time_limit_reached |= phases.time_limit;
-            finish(model, problem, free_bounds, before, &mut stats)
+            finish(model, problem, input_rows, free_bounds, before, &mut stats)
         }
     };
     stats.elapsed = start.elapsed();
@@ -141,7 +144,7 @@ fn working_model(problem: &mut Problem, settings: &Settings, start: Instant) -> 
         std::mem::take(&mut problem.variable_bounds)
     };
     let mut model = Model::from_parts(
-        problem.working_matrix(),
+        problem.a.working_matrix(),
         problem.take_objective(),
         rows,
         bounds,
@@ -156,6 +159,7 @@ fn working_model(problem: &mut Problem, settings: &Settings, start: Instant) -> 
 fn finish(
     model: Model,
     problem: Problem,
+    input_rows: (Vec<usize>, Vec<usize>),
     free_bounds: bool,
     before: Size,
     stats: &mut Stats,
@@ -165,14 +169,14 @@ fn finish(
     if model.revision == 0 {
         unchanged(model, problem, free_bounds)
     } else {
-        pack(model, problem, before)
+        pack(model, problem, input_rows, before)
     }
 }
 
 /// Return the input allocations: storage lent to the model comes back, and
 /// empty input bounds stay empty.
 fn unchanged(model: Model, mut problem: Problem, free_bounds: bool) -> Outcome {
-    problem.restore_working_matrix(model.a);
+    problem.a.restore_working_matrix(model.a);
     problem.c = model.objective.c;
     if !free_bounds {
         problem.variable_bounds = model.bounds;
@@ -289,12 +293,10 @@ fn inverse(map: &[usize], len: usize) -> Vec<usize> {
 /// The recovery map takes the survivor index vectors and the model's tape.
 fn build_postsolve(
     model: &mut Model,
-    original: &mut Problem,
+    (input_linear, input_conic): (Vec<usize>, Vec<usize>),
     survivors: Survivors,
     before: Size,
 ) -> (Postsolve, Vec<Cone>) {
-    let input_linear = std::mem::take(&mut original.linear_rows);
-    let input_conic = std::mem::take(&mut original.conic_rows);
     let coordinates = Coordinates {
         compact_to_stable_columns: Arc::new(survivors.columns),
         compact_to_stable_linear_rows: survivors.linear_rows,
@@ -345,11 +347,11 @@ fn compact_problem(
     {
         original.p
     } else if original.p.is_some() || model.objective.p.nnz() != 0 {
-        Some(Quadratic::from_sparse(
+        Some(QuadraticMatrix(Quadratic::from_sparse(
             model.objective.p,
             Arc::clone(compact_to_stable_columns),
             Arc::clone(&stable_to_compact_columns),
-        ))
+        )))
     } else {
         None
     };
@@ -383,7 +385,6 @@ fn compact_problem(
             block: block_index,
         });
     }
-    let (linear_rows, conic_rows) = row_indices(&domains);
     Problem {
         p,
         c,
@@ -391,24 +392,28 @@ fn compact_problem(
         variable_bounds: bounds,
         rows: domains,
         cones,
-        linear_rows,
-        conic_rows,
-        a: Matrix::Linked {
-            matrix: Some(model.a),
-            compact_to_stable_rows: coordinates
+        a: ConstraintMatrix::linked(
+            model.a,
+            n,
+            coordinates
                 .compact_to_stable_linear_rows
                 .iter()
                 .chain(&coordinates.compact_to_stable_conic_rows)
                 .copied()
                 .collect(),
             stable_to_compact_columns,
-        },
+        ),
     }
 }
 
-fn pack(mut model: Model, mut original: Problem, before: Size) -> Outcome {
+fn pack(
+    mut model: Model,
+    original: Problem,
+    input_rows: (Vec<usize>, Vec<usize>),
+    before: Size,
+) -> Outcome {
     let survivors = survivors(&model);
-    let (postsolve, cones) = build_postsolve(&mut model, &mut original, survivors, before);
+    let (postsolve, cones) = build_postsolve(&mut model, input_rows, survivors, before);
     let coordinates = &postsolve.coordinates;
     if coordinates.compact_to_stable_columns.is_empty()
         && coordinates.compact_to_stable_linear_rows.is_empty()
@@ -429,24 +434,24 @@ fn pack(mut model: Model, mut original: Problem, before: Size) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{matrix::CscMatrix, problem::ProblemData};
+    use crate::matrix::CscMatrix;
     #[test]
     fn auxiliary_replacing_an_original_column_rebuilds_the_hessian() {
         let p = CscMatrix::from_triplets(2, 2, vec![0, 1], vec![0, 1], vec![2., 3.]).unwrap();
-        let mut original = Problem::from(ProblemData {
-            p: Some(p),
+        let mut original = Problem {
+            p: Some(p.into()),
             c: vec![0.; 2],
             objective_constant: 0.,
-            a: CscMatrix::from_parts(1, 2, vec![0, 1, 2], vec![0, 0], vec![1., 1.]),
+            a: CscMatrix::from_parts(1, 2, vec![0, 1, 2], vec![0, 0], vec![1., 1.]).into(),
             rows: vec![Constraint::Linear(Bounds {
                 lower: f64::NEG_INFINITY,
                 upper: 2.,
             })],
             variable_bounds: vec![],
             cones: vec![],
-        });
+        };
         let mut model = Model::from_parts(
-            original.working_matrix(),
+            original.a.working_matrix(),
             original.take_objective(),
             vec![RowDomain::Linear(Bounds {
                 lower: f64::NEG_INFINITY,
@@ -457,13 +462,13 @@ mod tests {
         let before = size(&model);
         assert!(model.fix(0, 1.));
         model.add_variable(Bounds::FREE);
-        let Outcome::Reduced(r) = pack(model, original, before) else {
+        let Outcome::Reduced(r) = pack(model, original, (vec![0], vec![]), before) else {
             panic!()
         };
-        let p = r.problem.p().unwrap();
+        let p = r.problem.p.as_ref().unwrap();
         assert!(p.as_csc().is_none());
         assert_eq!(p.column(0).collect::<Vec<_>>(), [(0, 3.)]);
         assert_eq!(p.column(1).count(), 0);
-        assert_eq!(r.problem.objective_constant(), 1.);
+        assert_eq!(r.problem.objective_constant, 1.);
     }
 }

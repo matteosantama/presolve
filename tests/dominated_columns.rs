@@ -2,7 +2,7 @@ use presolve::{
     Outcome, Presolver, Settings,
     matrix::CscMatrix,
     postsolve::Solution,
-    problem::{Bounds, Constraint, ProblemData},
+    problem::{Bounds, Constraint, Problem},
     settings::{DominatedColumnSettings, Rules},
 };
 
@@ -22,12 +22,14 @@ fn only_dominated_columns() -> Settings {
 
 /// min x + 2y subject to x + y >= 1, y + w <= 5, with the given bounds on
 /// x and y and w >= 0. Column x dominates column y on both rows.
-fn problem(x: Bounds, y: Bounds) -> ProblemData {
-    ProblemData {
+fn problem(x: Bounds, y: Bounds) -> Problem {
+    Problem {
         p: None,
         c: vec![1., 2., 0.],
         objective_constant: 0.,
-        a: CscMatrix::from_triplets(2, 3, vec![0, 0, 1, 1], vec![0, 1, 1, 2], vec![1.; 4]).unwrap(),
+        a: CscMatrix::from_triplets(2, 3, vec![0, 0, 1, 1], vec![0, 1, 1, 2], vec![1.; 4])
+            .unwrap()
+            .into(),
         rows: vec![
             Constraint::Linear(Bounds {
                 lower: 1.,
@@ -59,7 +61,7 @@ const NONNEGATIVE: Bounds = Bounds {
 fn dominated_column_is_fixed_at_its_lower_bound() {
     let result = Presolver::new(only_dominated_columns())
         .unwrap()
-        .presolve(presolve::Problem::from(problem(NONNEGATIVE, NONNEGATIVE)));
+        .presolve(problem(NONNEGATIVE, NONNEGATIVE));
     let Outcome::Reduced(r) = result.outcome else {
         panic!("expected a reduced problem")
     };
@@ -81,31 +83,30 @@ fn dominated_column_is_fixed_at_its_lower_bound() {
 
 #[test]
 fn dominating_column_is_fixed_at_its_upper_bound_when_the_other_is_free_below() {
-    let result =
-        Presolver::new(only_dominated_columns())
-            .unwrap()
-            .presolve(presolve::Problem::from(problem(
-                Bounds {
-                    lower: 0.,
-                    upper: 3.,
-                },
-                Bounds {
-                    lower: f64::NEG_INFINITY,
-                    upper: f64::INFINITY,
-                },
-            )));
+    let result = Presolver::new(only_dominated_columns())
+        .unwrap()
+        .presolve(problem(
+            Bounds {
+                lower: 0.,
+                upper: 3.,
+            },
+            Bounds {
+                lower: f64::NEG_INFINITY,
+                upper: f64::INFINITY,
+            },
+        ));
     let Outcome::Reduced(r) = result.outcome else {
         panic!("expected a reduced problem")
     };
     assert_eq!(r.problem.variable_count(), 2);
     assert_eq!(
-        r.problem.row_bounds(0),
-        Bounds {
+        r.problem.rows[0],
+        Constraint::Linear(Bounds {
             lower: -2.,
             upper: f64::INFINITY
-        }
+        })
     );
-    assert_eq!(r.problem.objective_constant(), 3.);
+    assert_eq!(r.problem.objective_constant, 3.);
 }
 
 #[test]
@@ -124,7 +125,7 @@ fn unbounded_shift_direction_is_reported() {
     });
     let result = Presolver::new(only_dominated_columns())
         .unwrap()
-        .presolve(presolve::Problem::from(unbounded));
+        .presolve(unbounded);
     let Outcome::Unbounded(certificate) = result.outcome else {
         panic!("expected an unbounded certificate")
     };
@@ -135,7 +136,7 @@ fn unbounded_shift_direction_is_reported() {
 fn identical_support_pairs_are_found_inside_the_parallel_column_scan() {
     // min x + 2y subject to x + y >= 1, x + y + w <= 5: x and y share their
     // support without being proportional to w, so the default search finds them.
-    let problem = ProblemData {
+    let problem = Problem {
         p: None,
         c: vec![1., 2., 0.],
         objective_constant: 0.,
@@ -146,7 +147,8 @@ fn identical_support_pairs_are_found_inside_the_parallel_column_scan() {
             vec![0, 0, 1, 1, 2],
             vec![1., 1., 1., 1., 1.],
         )
-        .unwrap(),
+        .unwrap()
+        .into(),
         rows: vec![
             Constraint::Linear(Bounds {
                 lower: 1.,
@@ -170,7 +172,7 @@ fn identical_support_pairs_are_found_inside_the_parallel_column_scan() {
     };
     let result = Presolver::new(settings.clone())
         .unwrap()
-        .presolve(presolve::Problem::from(problem.clone()));
+        .presolve(problem.clone());
     let Outcome::Reduced(r) = result.outcome else {
         panic!("expected a reduced problem")
     };
@@ -188,23 +190,25 @@ fn identical_support_pairs_are_found_inside_the_parallel_column_scan() {
     assert_eq!(recovered.x, [1., 0., 0.]);
     assert_eq!(recovered.z, [0., 1., 0.]);
     // Without the general search, the nested-support pairs stay untouched.
-    let nested = Presolver::new(settings)
-        .unwrap()
-        .presolve(presolve::Problem::from(super_problem()));
+    let nested = Presolver::new(settings).unwrap().presolve(super_problem());
     assert!(matches!(nested.outcome, Outcome::Unchanged(_)));
 }
 
-fn super_problem() -> ProblemData {
+fn super_problem() -> Problem {
     problem(NONNEGATIVE, NONNEGATIVE)
 }
 
 #[test]
 fn quadratic_and_boxed_columns_are_left_alone() {
     let mut curved = problem(NONNEGATIVE, NONNEGATIVE);
-    curved.p = Some(CscMatrix::from_triplets(3, 3, vec![1], vec![1], vec![1.]).unwrap());
+    curved.p = Some(
+        CscMatrix::from_triplets(3, 3, vec![1], vec![1], vec![1.])
+            .unwrap()
+            .into(),
+    );
     let result = Presolver::new(only_dominated_columns())
         .unwrap()
-        .presolve(presolve::Problem::from(curved));
+        .presolve(curved);
     assert!(matches!(result.outcome, Outcome::Unchanged(_)));
     let boxed = problem(
         Bounds {
@@ -218,6 +222,6 @@ fn quadratic_and_boxed_columns_are_left_alone() {
     );
     let result = Presolver::new(only_dominated_columns())
         .unwrap()
-        .presolve(presolve::Problem::from(boxed));
+        .presolve(boxed);
     assert!(matches!(result.outcome, Outcome::Unchanged(_)));
 }

@@ -1,9 +1,8 @@
 //! Optional conversion of ranged rows and bounds to Ax+s=b.
-use crate::problem::pack_rows;
 use crate::{
     matrix::CscMatrix,
     postsolve::{PrimalCertificate, Solution},
-    problem::{Bounds, Cone, Problem},
+    problem::{Bounds, Cone, Constraint, Matrix, Problem, pack_rows, row_indices},
 };
 
 /// CSC conic form. P is still upper triangular; the objective constant is kept.
@@ -121,6 +120,15 @@ impl Problem {
     /// The returned map is necessary for dual and warm-start recovery.
     pub fn into_conic(self) -> ConicExport {
         let n = self.variable_count();
+        let (linear_rows, conic_rows) = row_indices(&self.rows);
+        let bounds_of = |i: usize| match self.rows[linear_rows[i]] {
+            Constraint::Linear(b) => b,
+            Constraint::Cone { .. } => unreachable!(),
+        };
+        let rhs_of = |i: usize| match self.rows[conic_rows[i]] {
+            Constraint::Cone { rhs, .. } => rhs,
+            Constraint::Linear(_) => unreachable!(),
+        };
         let mut outputs = Vec::new();
         let mut b = Vec::new();
         let mut cones = Vec::new();
@@ -152,54 +160,59 @@ impl Problem {
                 }
             }
         };
-        for i in 0..self.linear_row_count() {
-            append(self.row_bounds(i), Some(i), 0);
+        for i in 0..linear_rows.len() {
+            append(bounds_of(i), Some(i), 0);
         }
         for j in 0..n {
             append(self.variable_bounds(j), None, j);
         }
-        cones.extend_from_slice(self.cones());
-        for i in 0..self.conic_row_count() {
+        cones.extend_from_slice(&self.cones);
+        for i in 0..conic_rows.len() {
             outputs.push(Output::Cone(i));
-            b.push(self.conic_rhs(i));
+            b.push(rhs_of(i));
         }
+        let map = ConicMap {
+            outputs,
+            variables: n,
+            linear: linear_rows.len(),
+            conic: conic_rows.len(),
+        };
+        let outputs = &map.outputs;
         let identity = outputs.len() == self.row_count()
             && outputs.iter().enumerate().all(|(i, out)| match *out {
-                Output::Row { index, scale, .. } => self.linear_rows[index] == i && scale == -1.,
-                Output::Cone(index) => self.conic_rows[index] == i,
+                Output::Row { index, scale, .. } => linear_rows[index] == i && scale == -1.,
+                Output::Cone(index) => conic_rows[index] == i,
                 Output::Bound { .. } => false,
             });
         if identity {
-            let map = ConicMap {
-                outputs,
-                variables: n,
-                linear: self.linear_row_count(),
-                conic: self.conic_row_count(),
-            };
-            let p = self.into_csc();
+            let Problem {
+                p,
+                c,
+                objective_constant,
+                a,
+                ..
+            } = self;
             return ConicExport {
                 problem: ConicData {
-                    p: p.p,
-                    c: p.c,
-                    objective_constant: p.objective_constant,
-                    a: p.a,
+                    p: p.map(|p| p.into_csc()),
+                    c,
+                    objective_constant,
+                    a: a.into_csc(),
                     b,
                     cones,
                 },
                 map,
             };
         }
-        let a = if let crate::problem::Matrix::Csc(matrix) = &self.a {
+        let a = if let Matrix::Csc(matrix) = &self.a.0 {
             // Scatter each original column through at most two row sides.
             // Sorting is local to a column, never a scan over every (row,col).
             let mut row_map = vec![[None; 2]; self.row_count()];
             let mut bound_map = vec![[None; 2]; n];
             for (at, out) in outputs.iter().enumerate() {
                 let (slots, scale) = match *out {
-                    Output::Row { index, scale, .. } => {
-                        (&mut row_map[self.linear_rows[index]], -scale)
-                    }
-                    Output::Cone(i) => (&mut row_map[self.conic_rows[i]], 1.),
+                    Output::Row { index, scale, .. } => (&mut row_map[linear_rows[index]], -scale),
+                    Output::Cone(i) => (&mut row_map[conic_rows[i]], 1.),
                     Output::Bound { column, scale, .. } => (&mut bound_map[column], -scale),
                 };
                 let slot = usize::from(slots[0].is_some());
@@ -227,23 +240,24 @@ impl Problem {
             }
             CscMatrix::from_parts(outputs.len(), n, pointers, ri, values)
         } else {
-            let crate::problem::Matrix::Linked {
+            let Matrix::Linked {
                 matrix: Some(matrix),
                 compact_to_stable_rows,
                 stable_to_compact_columns,
-            } = &self.a
+                ..
+            } = &self.a.0
             else {
                 unreachable!("working storage is returned before export")
             };
             pack_rows(outputs.len(), n, |i| {
                 let (row, bound, scale) = match outputs[i] {
                     Output::Row { index, scale, .. } => (
-                        Some(compact_to_stable_rows[self.linear_rows[index]]),
+                        Some(compact_to_stable_rows[linear_rows[index]]),
                         None,
                         -scale,
                     ),
                     Output::Bound { column, scale, .. } => (None, Some((column, -scale)), 1.),
-                    Output::Cone(i) => (Some(compact_to_stable_rows[self.conic_rows[i]]), None, 1.),
+                    Output::Cone(i) => (Some(compact_to_stable_rows[conic_rows[i]]), None, 1.),
                 };
                 row.into_iter()
                     .flat_map(move |i| {
@@ -255,16 +269,15 @@ impl Problem {
                     .chain(bound)
             })
         };
-        let map = ConicMap {
-            outputs,
-            variables: n,
-            linear: self.linear_row_count(),
-            conic: self.conic_row_count(),
-        };
-        let (p, c, objective_constant) = self.into_objective();
+        let Problem {
+            p,
+            c,
+            objective_constant,
+            ..
+        } = self;
         ConicExport {
             problem: ConicData {
-                p,
+                p: p.map(|p| p.into_csc()),
                 c,
                 objective_constant,
                 a,

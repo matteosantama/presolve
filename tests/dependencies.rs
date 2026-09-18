@@ -2,11 +2,11 @@ use presolve::{
     Outcome, Presolver, Settings,
     matrix::CscMatrix,
     postsolve::Solution,
-    problem::{Bounds, Constraint, ProblemData},
+    problem::{Bounds, Constraint, Problem},
     settings::{Rules, WorkLimit},
 };
 
-fn fixture(quadratic: bool, perturbation: f64, inconsistent: bool) -> ProblemData {
+fn fixture(quadratic: bool, perturbation: f64, inconsistent: bool) -> Problem {
     // Third equality is the sum of two nonparallel, dense equalities.
     let rows = [
         [1., 2., 1., 2., 1., 2.],
@@ -21,9 +21,11 @@ fn fixture(quadratic: bool, perturbation: f64, inconsistent: bool) -> ProblemDat
     let c = (0..6)
         .map(|j| rows[0][j] + 2. * rows[1][j] + 3. * rows[2][j] - if quadratic { 1. } else { 0. })
         .collect();
-    ProblemData {
+    Problem {
         p: quadratic.then(|| {
-            CscMatrix::from_triplets(6, 6, (0..6).collect(), (0..6).collect(), vec![1.; 6]).unwrap()
+            CscMatrix::from_triplets(6, 6, (0..6).collect(), (0..6).collect(), vec![1.; 6])
+                .unwrap()
+                .into()
         }),
         c,
         objective_constant: 2.,
@@ -34,7 +36,8 @@ fn fixture(quadratic: bool, perturbation: f64, inconsistent: bool) -> ProblemDat
             (0..3).flat_map(|_| 0..6).collect(),
             rows.into_iter().flatten().collect(),
         )
-        .unwrap(),
+        .unwrap()
+        .into(),
         rows: rhs
             .into_iter()
             .map(|v| Constraint::Linear(Bounds::fixed(v)))
@@ -60,10 +63,11 @@ fn settings() -> Settings {
     settings.dependencies.work_limit = WorkLimit::Unlimited;
     settings
 }
-fn stationarity(data: &ProblemData, point: &Solution) {
+fn stationarity(data: &Problem, point: &Solution) {
+    let matrix = data.a.as_csc().unwrap();
     for j in 0..data.c.len() {
-        let a = (data.a.column_pointers()[j]..data.a.column_pointers()[j + 1])
-            .map(|k| data.a.values()[k] * point.y[data.a.row_indices()[k]])
+        let a = (matrix.column_pointers()[j]..matrix.column_pointers()[j + 1])
+            .map(|k| matrix.values()[k] * point.y[matrix.row_indices()[k]])
             .sum::<f64>();
         let gradient = data.c[j] + if data.p.is_some() { point.x[j] } else { 0. };
         assert!((gradient - a - point.z[j]).abs() < 1e-12);
@@ -73,9 +77,7 @@ fn stationarity(data: &ProblemData, point: &Solution) {
 fn dependent_equalities_preserve_quadratic_structure_and_dual_warm_starts() {
     for quadratic in [false, true] {
         let input = fixture(quadratic, 0., false);
-        let result = Presolver::new(settings())
-            .unwrap()
-            .presolve(presolve::Problem::from(input.clone()));
+        let result = Presolver::new(settings()).unwrap().presolve(input.clone());
         let after = result.stats.after.unwrap();
         assert_eq!(
             (after.variables, after.linear_rows, after.a_nonzeros),
@@ -98,7 +100,10 @@ fn dependent_equalities_preserve_quadratic_structure_and_dual_warm_starts() {
         assert_eq!(recovered.x, point.x);
         stationarity(&input, &recovered);
         let output = reduced.problem.into_csc();
-        assert_eq!(input.p, output.p);
+        assert_eq!(
+            input.p.as_ref().and_then(|p| p.as_csc()),
+            output.p.as_ref().and_then(|p| p.as_csc())
+        );
         assert_eq!(input.c, output.c);
         assert_eq!(input.variable_bounds, output.variable_bounds);
         stationarity(&output, &warm);
@@ -107,15 +112,14 @@ fn dependent_equalities_preserve_quadratic_structure_and_dual_warm_starts() {
 #[test]
 fn dependencies_detect_a_contradiction_but_retain_near_dependencies() {
     let input = fixture(true, 0., true);
-    let result = Presolver::new(settings())
-        .unwrap()
-        .presolve(presolve::Problem::from(input.clone()));
+    let result = Presolver::new(settings()).unwrap().presolve(input.clone());
     let Outcome::Infeasible(certificate) = result.outcome else {
         panic!("expected certificate")
     };
+    let matrix = input.a.as_csc().unwrap();
     for j in 0..6 {
-        let value: f64 = (input.a.column_pointers()[j]..input.a.column_pointers()[j + 1])
-            .map(|k| input.a.values()[k] * certificate.y[input.a.row_indices()[k]])
+        let value: f64 = (matrix.column_pointers()[j]..matrix.column_pointers()[j + 1])
+            .map(|k| matrix.values()[k] * certificate.y[matrix.row_indices()[k]])
             .sum();
         assert_eq!(value, 0.);
     }
@@ -133,7 +137,7 @@ fn dependencies_detect_a_contradiction_but_retain_near_dependencies() {
     assert!(contradiction > 0.);
     let result = Presolver::new(settings())
         .unwrap()
-        .presolve(presolve::Problem::from(fixture(true, 1e-10, false)));
+        .presolve(fixture(true, 1e-10, false));
     assert!(matches!(result.outcome, Outcome::Unchanged(_)));
 }
 #[test]
@@ -154,7 +158,7 @@ fn scratch_and_work_limits_do_not_partially_transform_the_problem() {
     for s in variants {
         let result = Presolver::new(s)
             .unwrap()
-            .presolve(presolve::Problem::from(fixture(true, 0., false)));
+            .presolve(fixture(true, 0., false));
         assert!(matches!(result.outcome, Outcome::Unchanged(_)));
     }
 }
@@ -187,10 +191,11 @@ fn multirow_proofs_survive_prior_dependency_deletions() {
         );
     }
     let y: Vec<_> = (0..m).map(|i| (i as f64 - 4.) / 2.).collect();
-    let input = ProblemData {
+    let input = Problem {
         p: Some(
             CscMatrix::from_triplets(n, n, (0..n).collect(), (0..n).collect(), vec![1.; n])
-                .unwrap(),
+                .unwrap()
+                .into(),
         ),
         c: (0..n)
             .map(|j| -1. + (0..m).map(|i| rows[i][j] * y[i]).sum::<f64>())
@@ -203,7 +208,8 @@ fn multirow_proofs_survive_prior_dependency_deletions() {
             (0..m).flat_map(|_| 0..n).collect(),
             rows.iter().flatten().copied().collect(),
         )
-        .unwrap(),
+        .unwrap()
+        .into(),
         rows: rows
             .iter()
             .map(|r| Constraint::Linear(Bounds::fixed(r.iter().sum())))
@@ -221,7 +227,7 @@ fn multirow_proofs_survive_prior_dependency_deletions() {
     options.dependencies.max_basis_rows = rank;
     let result = Presolver::new(options.clone())
         .unwrap()
-        .presolve(presolve::Problem::from(input.clone()));
+        .presolve(input.clone());
     assert_eq!(result.stats.after.unwrap().linear_rows, rank);
     let Outcome::Reduced(reduced) = result.outcome else {
         panic!("expected reduction")
@@ -244,14 +250,14 @@ fn multirow_proofs_survive_prior_dependency_deletions() {
     b.upper += 1.;
     let result = Presolver::new(options)
         .unwrap()
-        .presolve(presolve::Problem::from(inconsistent.clone()));
+        .presolve(inconsistent.clone());
     let Outcome::Infeasible(certificate) = result.outcome else {
         panic!("expected contradiction")
     };
+    let matrix = inconsistent.a.as_csc().unwrap();
     for j in 0..n {
-        let residual: f64 = (inconsistent.a.column_pointers()[j]
-            ..inconsistent.a.column_pointers()[j + 1])
-            .map(|k| inconsistent.a.values()[k] * certificate.y[inconsistent.a.row_indices()[k]])
+        let residual: f64 = (matrix.column_pointers()[j]..matrix.column_pointers()[j + 1])
+            .map(|k| matrix.values()[k] * certificate.y[matrix.row_indices()[k]])
             .sum();
         assert_eq!(residual, 0.);
     }

@@ -7,4 +7,4 @@ pub(crate) mod sparse;
 #[cfg(test)]
 pub(crate) use csc::test_matrix;
 pub use csc::{CscMatrix, CscMatrixRef, MatrixError};
-pub use quadratic::QuadraticRef;
+pub use quadratic::QuadraticMatrix;

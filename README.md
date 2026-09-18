@@ -21,7 +21,7 @@ subject to  lᵣ ≤ A x ≤ uᵣ
 ```
 
 `P` is positive semidefinite; omitting it gives a linear objective. Linear and
-conic rows share the `ProblemData.a` sparse matrix and are distinguished by
+conic rows share the `Problem.a` sparse matrix and are distinguished by
 `Constraint::Linear` and `Constraint::Cone`. The notation `A` and `G` above separates
 these two row domains for readability.
 
@@ -588,9 +588,12 @@ require matching pool modes, which are recorded in result metadata.
 
 ## Results and postsolve
 
-`presolver.presolve(problem)` consumes a `Problem`, built with
-`Problem::from(ProblemData)`, and returns an outcome plus size and execution
-statistics. `Presolver::default()` uses the default settings serially;
+`presolver.presolve(problem)` consumes a `Problem` and returns an outcome plus
+size and execution statistics. `Problem` is a plain struct whose two matrix
+fields are opaque: `a` is a `ConstraintMatrix` and `p` an optional
+`QuadraticMatrix`, each built from a `CscMatrix` with `into()`. A reduced
+problem keeps the working model's editable storage in those fields, and an
+unchanged problem hands the caller's buffers back untouched. `Presolver::default()` uses the default settings serially;
 `Presolver::new(settings)` creates the execution resources once and returns
 `InitError` if they cannot be initialized. That error is separate from
 optimization outcomes:
@@ -617,8 +620,10 @@ adjust them for interiority. Forward warm starts can need solver refinement
 after redundant constraints are removed; they are not guaranteed to remain
 optimal or stationary.
 
-Reduced constraint storage is exported explicitly with `Problem::into_csc()` or
-`Problem::into_conic()`. The latter returns an additional map for translating
+Reduced storage is exported explicitly: `as_csc()` on either matrix borrows
+existing CSC buffers without packing, `into_csc()` on a matrix or on the whole
+`Problem` packs once, and `Problem::into_conic()` expands ranged rows and bounds
+to `Ax + s = b` form. The latter returns an additional map for translating
 conic-form multipliers into native coordinates before postsolve.
 See [results](src/result.rs), [postsolve](src/postsolve/mod.rs), and
 [conic export](src/problem/conic.rs).
