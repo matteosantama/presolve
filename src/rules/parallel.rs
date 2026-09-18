@@ -78,6 +78,7 @@ fn packed((support, coefficients): (u32, u32)) -> u64 {
 
 /// Returns A_base / A_other, plus whether equality is exact in floating-point
 /// arithmetic. The latter is required before two inequalities become equality.
+#[inline]
 fn proportional<const AXIS: usize>(
     base: crate::matrix::linked::View<'_, AXIS>,
     other: crate::matrix::linked::View<'_, AXIS>,

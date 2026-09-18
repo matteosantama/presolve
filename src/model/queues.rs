@@ -17,6 +17,7 @@ impl Worklist {
         }
     }
 
+    #[inline]
     pub fn push(&mut self, index: usize) {
         if index >= self.queued.len() {
             self.queued.resize(index + 1, false);
@@ -26,6 +27,7 @@ impl Worklist {
         }
     }
 
+    #[inline]
     pub fn pop(&mut self) -> Option<usize> {
         let index = self.entries.pop()?;
         self.queued[index] = false;
@@ -54,6 +56,7 @@ impl Worklist {
     }
 
     /// Reuse the allocation for a different index space, discarding entries.
+    #[inline]
     pub fn reset(&mut self, size: usize) {
         self.clear();
         self.queued.clear();
@@ -97,6 +100,7 @@ impl ActivityRows {
         }
     }
 
+    #[inline]
     pub fn push(&mut self, row: usize) {
         let flags = self.flags[row];
         if flags & PROPAGATION == 0 {
@@ -159,6 +163,7 @@ impl Queues {
         }
     }
 
+    #[inline]
     pub fn row_changed(&mut self, row: usize, size: usize, equality: bool) {
         match size {
             0 => self.empty_rows.push(row),
@@ -170,6 +175,7 @@ impl Queues {
         self.changed_activities.push(row);
     }
 
+    #[inline]
     pub fn column_changed(&mut self, column: usize, size: usize) {
         self.unlocked_columns.push(column);
         match size {

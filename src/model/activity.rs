@@ -11,6 +11,7 @@ pub(crate) struct Locks {
 }
 
 impl Locks {
+    #[inline]
     pub fn contribution(coefficient: f64, domain: RowDomain) -> Self {
         match domain {
             RowDomain::Deleted => Self::default(),
@@ -33,10 +34,12 @@ impl Locks {
         }
     }
 
+    #[inline]
     pub fn add(&mut self, other: Self) {
         self.up += other.up;
         self.down += other.down;
     }
+    #[inline]
     pub fn remove(&mut self, other: Self) {
         self.up -= other.up;
         self.down -= other.down;
@@ -208,6 +211,7 @@ impl Activity {
         }
     }
 
+    #[inline]
     pub fn replace_bound(&mut self, a: f64, old: Bounds, new: Bounds) -> bool {
         let (old_min, old_max) = Self::terms(a, old);
         let (new_min, new_max) = Self::terms(a, new);

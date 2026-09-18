@@ -39,6 +39,7 @@ fn worth_cancelling(length: usize, count: usize) -> bool {
     count.saturating_mul(2) >= length.saturating_add(required)
 }
 
+#[inline]
 fn subtract<I: Iterator<Item = (usize, f64)> + Clone>(
     base: I,
     other: I,

@@ -268,6 +268,7 @@ impl Model {
         Some(Arc::clone(equation))
     }
 
+    #[inline]
     fn changed_row(&mut self, row: usize) {
         let domain = self.rows[row];
         if let RowDomain::Cone { block, .. } = domain {
@@ -291,6 +292,7 @@ impl Model {
     /// Structural edits are infrequent relative to activity queries. Cache
     /// activities until an incident bound or coefficient changes; recomputing
     /// dirty rows also avoids cumulative subtract/add cancellation error.
+    #[inline]
     pub fn activity(&mut self, row: usize) -> Activity {
         if self.activities[row].min.infinite == STALE {
             self.activities[row] = Activity::compute(self.a.row(row), &self.bounds, None);

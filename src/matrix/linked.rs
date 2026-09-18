@@ -57,6 +57,7 @@ pub(crate) struct Cursor<const AXIS: usize> {
     next: u32,
 }
 impl<const AXIS: usize> Cursor<AXIS> {
+    #[inline]
     pub fn next(&mut self, matrix: &LinkedMatrix) -> Option<(usize, f64)> {
         if self.next == NONE {
             return None;
@@ -71,6 +72,7 @@ impl<const AXIS: usize> Cursor<AXIS> {
 }
 impl<const AXIS: usize> Iterator for Iter<'_, AXIS> {
     type Item = (usize, f64);
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         let entry = self.cursor.next(self.matrix)?;
         self.remaining -= 1;
@@ -82,17 +84,20 @@ impl<const AXIS: usize> Iterator for Iter<'_, AXIS> {
 }
 impl<const AXIS: usize> ExactSizeIterator for Iter<'_, AXIS> {}
 impl<'a, const AXIS: usize> View<'a, AXIS> {
+    #[inline]
     pub fn len(self) -> usize {
         self.list.len as usize
     }
     pub fn is_empty(self) -> bool {
         self.len() == 0
     }
+    #[inline]
     pub fn cursor(self) -> Cursor<AXIS> {
         Cursor {
             next: self.list.head,
         }
     }
+    #[inline]
     pub fn iter(self) -> Iter<'a, AXIS> {
         Iter {
             matrix: self.matrix,
