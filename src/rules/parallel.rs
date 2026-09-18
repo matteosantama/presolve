@@ -4,11 +4,9 @@
 //! propose groups; sparse comparisons establish proportionality before edits.
 
 use crate::{
-    core::{
-        execution::Executor,
-        model::{Model, RowDomain},
-    },
-    postsolve::tape::{Certificate, Point, Recovery, Rule, Side},
+    executor::Executor,
+    model::tape::{Certificate, Rule, Side},
+    model::{Model, RowDomain},
     problem::Bounds,
 };
 use wide::{f64x4, u32x4};
@@ -71,11 +69,19 @@ fn fingerprint<I: ExactSizeIterator<Item = (usize, f64)> + Clone>(mut entries: I
     entries.fold((collapse(support), collapse(coefficients)), scalar)
 }
 
+/// One word keeps the lexicographic (support, coefficients) order while the
+/// candidate sort compares and moves smaller keys.
+#[inline]
+fn packed((support, coefficients): (u32, u32)) -> u64 {
+    (u64::from(support) << 32) | u64::from(coefficients)
+}
+
 /// Returns A_base / A_other, plus whether equality is exact in floating-point
 /// arithmetic. The latter is required before two inequalities become equality.
-fn proportional(
-    base: crate::matrix::linked::View<'_>,
-    other: crate::matrix::linked::View<'_>,
+#[inline]
+fn proportional<const AXIS: usize>(
+    base: crate::matrix::linked::View<'_, AXIS>,
+    other: crate::matrix::linked::View<'_, AXIS>,
     tolerance: f64,
 ) -> Option<(f64, bool)> {
     if base.is_empty() || base.len() != other.len() {
@@ -99,17 +105,35 @@ fn proportional(
     Some((ratio, exact))
 }
 
-fn candidate_groups<K: Ord + Send>(
+/// Packed constraint fingerprint plus the packed Hessian column fingerprint
+/// when present. The support hash occupies the high word, so sorting by this
+/// key keeps every column with the same support hash contiguous.
+pub(super) type ColumnKey = (u64, Option<u64>);
+
+/// The support hash of a packed fingerprint.
+pub(super) fn support_hash(key: u64) -> u32 {
+    (key >> 32) as u32
+}
+
+/// Candidates sorted by `(key, index)`. `prefix` gives the leading packed
+/// word of the key, which orders like `Ord` and drives the radix passes.
+fn sorted_candidates<K: Ord + Copy + Send>(
     count: usize,
     nonzeros: usize,
     executor: &Executor,
     key: impl Fn(usize) -> Option<K> + Sync,
-) -> Vec<Vec<usize>> {
+    prefix: impl Fn(&K) -> u64,
+) -> Vec<(K, usize)> {
     let enough_work = count >= MIN_PARALLEL_ITEMS && nonzeros >= MIN_PARALLEL_NONZEROS;
     let entry = |i| key(i).map(|key| (key, i));
     // The index is a unique tiebreaker, making group and member order identical
     // regardless of worker scheduling or sorting algorithm.
-    let entries = executor.filter_map_sorted(count, enough_work, entry);
+    executor.filter_map_sorted(count, enough_work, entry, |(key, _)| prefix(key))
+}
+
+/// Runs of equal keys with at least two members, as index ranges into the
+/// sorted entries, in sorted order.
+fn runs<K: PartialEq>(entries: &[(K, usize)]) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut start = 0;
     while start < entries.len() {
@@ -118,26 +142,58 @@ fn candidate_groups<K: Ord + Send>(
             end += 1;
         }
         if end - start > 1 {
-            out.push(entries[start..end].iter().map(|(_, i)| *i).collect());
+            out.push((start, end));
         }
         start = end;
     }
     out
 }
 
+#[cfg(test)]
+fn groups_from<K: PartialEq>(entries: &[(K, usize)]) -> Vec<Vec<usize>> {
+    runs(entries)
+        .into_iter()
+        .map(|(start, end)| entries[start..end].iter().map(|(_, i)| *i).collect())
+        .collect()
+}
+
+#[cfg(test)]
+fn candidate_groups<K: Ord + Copy + Send>(
+    count: usize,
+    nonzeros: usize,
+    executor: &Executor,
+    key: impl Fn(usize) -> Option<K> + Sync,
+    prefix: impl Fn(&K) -> u64,
+) -> Vec<Vec<usize>> {
+    groups_from(&sorted_candidates(count, nonzeros, executor, key, prefix))
+}
+
 impl Model {
     pub fn parallel_rows(&mut self, executor: &Executor) -> Result<usize, Certificate> {
-        let groups = candidate_groups(self.rows.len(), self.a.nnz(), executor, |i| {
-            (matches!(self.rows[i], RowDomain::Linear(_)) && self.a.row(i).len() > 1)
-                .then(|| fingerprint(self.a.row(i).iter()))
-        });
+        // A scan is a function of the row domains and the matrix; a repeat
+        // of a fruitless scan on the same state finds nothing.
+        let input = self.rows_revision;
+        if self.parallel_rows_seen == input {
+            return Ok(0);
+        }
+        let entries = sorted_candidates(
+            self.rows.len(),
+            self.a.nnz(),
+            executor,
+            |i| {
+                (matches!(self.rows[i], RowDomain::Linear(_)) && self.a.row(i).len() > 1)
+                    .then(|| packed(fingerprint(self.a.row(i).iter())))
+            },
+            |&hash| hash,
+        );
         let mut comparisons = 0;
         let mut unmatched = Vec::new();
-        for group in groups {
-            let base = group[0];
+        for (start, end) in runs(&entries) {
+            let group = &entries[start..end];
+            let base = group[0].1;
             unmatched.clear();
             // Preserve the usual linear-time path and its representative order.
-            for &other in &group[1..] {
+            for &(_, other) in &group[1..] {
                 comparisons += 1;
                 if !self.merge_parallel_rows(base, other)? {
                     unmatched.push((other, 0.0));
@@ -182,14 +238,19 @@ impl Model {
                 }
             }
         }
+        if self.rows_revision == input {
+            self.parallel_rows_seen = input;
+        }
         Ok(comparisons)
     }
 
     /// Authoritative comparison and mutation, shared by both discovery paths.
     fn merge_parallel_rows(&mut self, base: usize, other: usize) -> Result<bool, Certificate> {
-        let Some((ratio, exact)) =
-            proportional(self.a.row(base), self.a.row(other), self.numerics.parallel)
-        else {
+        let Some((ratio, exact)) = proportional(
+            self.a.row(base),
+            self.a.row(other),
+            self.settings.numerics.parallel,
+        ) else {
             return Ok(false);
         };
         let RowDomain::Linear(b) = self.rows[base] else {
@@ -216,18 +277,13 @@ impl Model {
             let gap = intersection.lower - intersection.upper;
             if !exact
                 || gap
-                    <= self.numerics.feasibility
+                    <= self.settings.numerics.feasibility
                         * (1.0 + intersection.lower.abs().max(intersection.upper.abs()))
             {
                 return Ok(false);
             }
-            let mut point = Point::zeros(self.bounds.len(), self.rows.len());
-            point.y[base] = if b.lower > upper { 1.0 } else { -1.0 };
-            point.y[other] = -ratio * point.y[base];
-            return Err(Certificate {
-                mode: Recovery::PrimalInfeasibility,
-                point,
-            });
+            let sign = if b.lower > upper { 1.0 } else { -1.0 };
+            return Err(self.primal_certificate([(base, sign), (other, -ratio * sign)], []));
         }
         if intersection.equality() && !b.equality() && !exact {
             return Ok(false);
@@ -238,7 +294,7 @@ impl Model {
         if intersection.upper < b.upper {
             self.tighten_row(base, other, ratio, Side::Upper, intersection.upper);
         }
-        self.replace_row(other, &[], RowDomain::Deleted);
+        self.clear_row(other);
         self.postsolve.rules.push(Rule::MergedRow {
             keep: base,
             removed: other,
@@ -248,34 +304,62 @@ impl Model {
     }
 
     pub fn parallel_columns(&mut self, executor: &Executor) -> Result<usize, Certificate> {
-        let groups = candidate_groups(
+        let input = self.revision;
+        if self.parallel_columns_seen == input {
+            return Ok(0);
+        }
+        // Sort by the constraint key alone, then hash the Hessian column only
+        // inside runs of equal constraint key, where it decides the order.
+        // The result is the lexicographic `((a, p), index)` order, and almost
+        // no column sits in such a run, so almost no Hessian column is hashed.
+        let by_constraint: Vec<(u64, usize)> = sorted_candidates(
             self.bounds.len(),
             self.a.nnz().saturating_add(self.objective.p.nnz()),
             executor,
             |j| {
-                (self.alive[j] && !self.a.column(j).is_empty()).then(|| {
-                    let p = self.objective.p.column(j);
-                    (
-                        fingerprint(self.a.column(j).iter()),
-                        (!p.is_empty()).then(|| fingerprint(p.iter().copied())),
-                    )
-                })
+                (self.alive[j] && !self.a.column(j).is_empty())
+                    .then(|| packed(fingerprint(self.a.column(j).iter())))
             },
+            |&hash| hash,
         );
+        let mut entries: Vec<(ColumnKey, usize)> = Vec::with_capacity(by_constraint.len());
+        let mut start = 0;
+        while start < by_constraint.len() {
+            let hash = by_constraint[start].0;
+            let mut end = start + 1;
+            while end < by_constraint.len() && by_constraint[end].0 == hash {
+                end += 1;
+            }
+            if end - start == 1 {
+                entries.push(((hash, None), by_constraint[start].1));
+            } else {
+                let run_start = entries.len();
+                for &(_, j) in &by_constraint[start..end] {
+                    let p = self.objective.p.column(j);
+                    let key = (!p.is_empty()).then(|| packed(fingerprint(p.iter().copied())));
+                    entries.push(((hash, key), j));
+                }
+                entries[run_start..].sort_unstable();
+            }
+            start = end;
+        }
         let mut comparisons = 0;
-        for group in groups {
-            for (at, &j) in group.iter().enumerate() {
+        for (start, end) in runs(&entries) {
+            let group = &entries[start..end];
+            for (at, &(_, j)) in group.iter().enumerate() {
                 if !self.alive[j] {
                     continue;
                 }
-                for &k in &group[at + 1..] {
+                for &(_, k) in &group[at + 1..] {
                     if !self.alive[k] {
                         continue;
                     }
                     comparisons += 1;
-                    let Some((ratio, exact)) =
-                        proportional(self.a.column(k), self.a.column(j), self.numerics.parallel)
-                    else {
+                    let Some((ratio, exact)) = proportional(
+                        self.a.column(k),
+                        self.a.column(j),
+                        self.settings.numerics.parallel,
+                    ) else {
                         continue;
                     };
                     // An approximate null direction can have quadratic cost
@@ -304,13 +388,7 @@ impl Model {
                         self.bounds[k].lower
                     };
                     if !bj.is_finite() && !bk.is_finite() {
-                        let mut point = Point::zeros(self.bounds.len(), self.rows.len());
-                        point.x[j] = dj;
-                        point.x[k] = dk;
-                        return Err(Certificate {
-                            mode: Recovery::DualInfeasibility,
-                            point,
-                        });
+                        return Err(self.dual_certificate([(j, dj), (k, dk)]));
                     }
                     if !bj.is_finite() {
                         self.fix(k, bk);
@@ -319,6 +397,12 @@ impl Model {
                     }
                 }
             }
+        }
+        if self.settings.rules.dominated_columns {
+            comparisons += self.dominated_support_groups(&entries)?;
+        }
+        if self.revision == input {
+            self.parallel_columns_seen = input;
         }
         Ok(comparisons)
     }
@@ -452,13 +536,16 @@ mod tests {
                         matrix.set(i, j, (1 + i + 7 * j) as f64);
                     }
                 }
-                for view in (0..rows)
-                    .map(|i| matrix.row(i))
-                    .chain((0..cols).map(|j| matrix.column(j)))
-                {
+                fn check<const AXIS: usize>(view: crate::matrix::linked::View<'_, AXIS>) {
                     let expected = scalar_fingerprint(view.iter());
                     assert_eq!(fingerprint(view.iter()), expected);
                     assert_eq!(fingerprint(view.to_vec().iter().copied()), expected);
+                }
+                for i in 0..rows {
+                    check(matrix.row(i));
+                }
+                for j in 0..cols {
+                    check(matrix.column(j));
                 }
             }
         }
@@ -467,20 +554,33 @@ mod tests {
     #[test]
     fn discovery_uses_requested_threads_and_preserves_filtered_group_order() {
         let key = |i: usize| (!i.is_multiple_of(5)).then_some(i % 17);
+        let prefix = |&k: &usize| k as u64;
         let executor = Executor::new(3).unwrap();
-        let serial = candidate_groups(2048, MIN_PARALLEL_NONZEROS, &Executor::Serial, key);
-        let parallel = candidate_groups(2048, MIN_PARALLEL_NONZEROS, &executor, |i| {
-            assert_eq!(rayon::current_num_threads(), 3);
-            key(i)
-        });
+        let serial = candidate_groups(2048, MIN_PARALLEL_NONZEROS, &Executor::Serial, key, prefix);
+        let parallel = candidate_groups(
+            2048,
+            MIN_PARALLEL_NONZEROS,
+            &executor,
+            |i| {
+                assert_eq!(rayon::current_num_threads(), 3);
+                key(i)
+            },
+            prefix,
+        );
         assert_eq!(serial, parallel);
 
         // Both the slot and work thresholds must be met before using a pool.
         for (count, work) in [(1023, MIN_PARALLEL_NONZEROS), (2048, 32767)] {
-            candidate_groups(count, work, &executor, |i| {
-                assert!(rayon::current_thread_index().is_none());
-                key(i)
-            });
+            candidate_groups(
+                count,
+                work,
+                &executor,
+                |i| {
+                    assert!(rayon::current_thread_index().is_none());
+                    key(i)
+                },
+                prefix,
+            );
         }
     }
 }

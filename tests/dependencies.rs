@@ -2,11 +2,11 @@ use presolve::{
     Outcome, Presolver, Settings,
     matrix::CscMatrix,
     postsolve::Solution,
-    problem::{Bounds, Constraint, ProblemData},
+    problem::{Bounds, Constraint, Problem},
     settings::{Rules, WorkLimit},
 };
 
-fn fixture(quadratic: bool, perturbation: f64, inconsistent: bool) -> ProblemData {
+fn fixture(quadratic: bool, perturbation: f64, inconsistent: bool) -> Problem {
     // Third equality is the sum of two nonparallel, dense equalities.
     let rows = [
         [1., 2., 1., 2., 1., 2.],
@@ -21,12 +21,12 @@ fn fixture(quadratic: bool, perturbation: f64, inconsistent: bool) -> ProblemDat
     let c = (0..6)
         .map(|j| rows[0][j] + 2. * rows[1][j] + 3. * rows[2][j] - if quadratic { 1. } else { 0. })
         .collect();
-    ProblemData {
+    Problem {
         p: quadratic.then(|| {
             CscMatrix::from_triplets(6, 6, (0..6).collect(), (0..6).collect(), vec![1.; 6]).unwrap()
         }),
         c,
-        objective_constant: 2.,
+        c0: 2.,
         a: CscMatrix::from_triplets(
             3,
             6,
@@ -60,10 +60,11 @@ fn settings() -> Settings {
     settings.dependencies.work_limit = WorkLimit::Unlimited;
     settings
 }
-fn stationarity(data: &ProblemData, point: &Solution) {
+fn stationarity(data: &Problem, point: &Solution) {
+    let matrix = &data.a;
     for j in 0..data.c.len() {
-        let a = (data.a.column_pointers()[j]..data.a.column_pointers()[j + 1])
-            .map(|k| data.a.values()[k] * point.y[data.a.row_indices()[k]])
+        let a = (matrix.column_pointers()[j]..matrix.column_pointers()[j + 1])
+            .map(|k| matrix.values()[k] * point.y[matrix.row_indices()[k]])
             .sum::<f64>();
         let gradient = data.c[j] + if data.p.is_some() { point.x[j] } else { 0. };
         assert!((gradient - a - point.z[j]).abs() < 1e-12);
@@ -95,7 +96,7 @@ fn dependent_equalities_preserve_quadratic_structure_and_dual_warm_starts() {
         let recovered = reduced.postsolve.recover_solution(warm.as_ref());
         assert_eq!(recovered.x, point.x);
         stationarity(&input, &recovered);
-        let output = reduced.problem.into_csc();
+        let output = reduced.problem;
         assert_eq!(input.p, output.p);
         assert_eq!(input.c, output.c);
         assert_eq!(input.variable_bounds, output.variable_bounds);
@@ -109,9 +110,10 @@ fn dependencies_detect_a_contradiction_but_retain_near_dependencies() {
     let Outcome::Infeasible(certificate) = result.outcome else {
         panic!("expected certificate")
     };
+    let matrix = &input.a;
     for j in 0..6 {
-        let value: f64 = (input.a.column_pointers()[j]..input.a.column_pointers()[j + 1])
-            .map(|k| input.a.values()[k] * certificate.y[input.a.row_indices()[k]])
+        let value: f64 = (matrix.column_pointers()[j]..matrix.column_pointers()[j + 1])
+            .map(|k| matrix.values()[k] * certificate.y[matrix.row_indices()[k]])
             .sum();
         assert_eq!(value, 0.);
     }
@@ -183,7 +185,7 @@ fn multirow_proofs_survive_prior_dependency_deletions() {
         );
     }
     let y: Vec<_> = (0..m).map(|i| (i as f64 - 4.) / 2.).collect();
-    let input = ProblemData {
+    let input = Problem {
         p: Some(
             CscMatrix::from_triplets(n, n, (0..n).collect(), (0..n).collect(), vec![1.; n])
                 .unwrap(),
@@ -191,7 +193,7 @@ fn multirow_proofs_survive_prior_dependency_deletions() {
         c: (0..n)
             .map(|j| -1. + (0..m).map(|i| rows[i][j] * y[i]).sum::<f64>())
             .collect(),
-        objective_constant: 0.,
+        c0: 0.,
         a: CscMatrix::from_triplets(
             m,
             n,
@@ -231,7 +233,7 @@ fn multirow_proofs_survive_prior_dependency_deletions() {
     };
     let warm = reduced.postsolve.reduce_warm_start(point.as_ref());
     stationarity(&input, &reduced.postsolve.recover_solution(warm.as_ref()));
-    stationarity(&reduced.problem.into_csc(), &warm);
+    stationarity(&reduced.problem, &warm);
     let mut inconsistent = input;
     let Constraint::Linear(ref mut b) = inconsistent.rows[m - 1] else {
         unreachable!()
@@ -244,11 +246,127 @@ fn multirow_proofs_survive_prior_dependency_deletions() {
     let Outcome::Infeasible(certificate) = result.outcome else {
         panic!("expected contradiction")
     };
+    let matrix = &inconsistent.a;
     for j in 0..n {
-        let residual: f64 = (inconsistent.a.column_pointers()[j]
-            ..inconsistent.a.column_pointers()[j + 1])
-            .map(|k| inconsistent.a.values()[k] * certificate.y[inconsistent.a.row_indices()[k]])
+        let residual: f64 = (matrix.column_pointers()[j]..matrix.column_pointers()[j + 1])
+            .map(|k| matrix.values()[k] * certificate.y[matrix.row_indices()[k]])
             .sum();
         assert_eq!(residual, 0.);
     }
+}
+
+fn leaf_chain_fixture(inconsistent: bool, oversized_equality: bool) -> Problem {
+    let core = fixture(false, 0., inconsistent);
+    let mut ir = vec![0, 0, 1, 1, 2, 2];
+    let mut jc = vec![6, 7, 7, 8, 8, 0];
+    let mut values = vec![1.; 6];
+    for j in 0..6 {
+        for k in core.a.column_pointers()[j]..core.a.column_pointers()[j + 1] {
+            ir.push(core.a.row_indices()[k] + 3);
+            jc.push(j);
+            values.push(core.a.values()[k]);
+        }
+    }
+    // This row must not affect degrees in the eligible equality subsystem.
+    for j in if oversized_equality {
+        vec![0, 1, 2, 3, 4, 5, 6]
+    } else {
+        vec![6]
+    } {
+        ir.push(6);
+        jc.push(j);
+        values.push(1.);
+    }
+    let mut rows = vec![Constraint::Linear(Bounds::fixed(2.)); 3];
+    rows.extend(core.rows);
+    rows.push(Constraint::Linear(if oversized_equality {
+        Bounds::fixed(7.)
+    } else {
+        Bounds {
+            lower: 0.,
+            upper: 2.,
+        }
+    }));
+    let a = CscMatrix::from_triplets(7, 9, ir, jc, values).unwrap();
+    // x=1 and unit equality multipliers satisfy KKT for the consistent model.
+    let c = (0..9)
+        .map(|j| {
+            (a.column_pointers()[j]..a.column_pointers()[j + 1])
+                .filter(|&k| oversized_equality || a.row_indices()[k] != 6)
+                .map(|k| a.values()[k])
+                .sum()
+        })
+        .collect();
+    Problem {
+        p: None,
+        c,
+        c0: 0.,
+        a,
+        rows,
+        variable_bounds: vec![Bounds::FREE; 9],
+        cones: vec![],
+    }
+}
+
+#[test]
+fn recursive_peeling_preserves_basis_budget_and_original_constraints() {
+    for oversized_equality in [false, true] {
+        let input = leaf_chain_fixture(false, oversized_equality);
+        let mut options = settings();
+        options.dependencies.max_basis_rows = 2;
+        options.dependencies.max_row_length = 6;
+        let result = Presolver::new(options).unwrap().presolve(input.clone());
+        let Outcome::Reduced(reduced) = result.outcome else {
+            panic!("core dependence was missed")
+        };
+        assert_eq!(reduced.problem.rows.len(), 6);
+        assert_eq!(reduced.problem.c.len(), 9);
+        let mut point = Solution {
+            x: vec![1.; 9],
+            y: vec![1.; 7],
+            z: vec![0.; 9],
+            conic_dual: vec![],
+            conic_slack: vec![],
+        };
+        if !oversized_equality {
+            point.y[6] = 0.;
+        }
+        let warm = reduced.postsolve.reduce_warm_start(point.as_ref());
+        stationarity(&reduced.problem, &warm);
+        let recovered = reduced.postsolve.recover_solution(warm.as_ref());
+        assert_eq!(recovered.x, point.x);
+        // All three peeled rows remain and their multipliers are untouched.
+        assert_eq!(recovered.y[..3], point.y[..3]);
+        stationarity(&input, &recovered);
+    }
+}
+
+#[test]
+fn recursive_peeling_keeps_inconsistent_core_and_lifts_its_certificate() {
+    let input = leaf_chain_fixture(true, false);
+    let mut options = settings();
+    options.dependencies.max_basis_rows = 2;
+    let result = Presolver::new(options).unwrap().presolve(input.clone());
+    let Outcome::Infeasible(certificate) = result.outcome else {
+        panic!("inconsistent core was missed")
+    };
+    assert_eq!(certificate.y[..3], [0.; 3]);
+    for j in 0..9 {
+        let residual: f64 = (input.a.column_pointers()[j]..input.a.column_pointers()[j + 1])
+            .map(|k| input.a.values()[k] * certificate.y[input.a.row_indices()[k]])
+            .sum();
+        assert_eq!(residual, 0.);
+    }
+    let contradiction: f64 = input
+        .rows
+        .iter()
+        .zip(certificate.y)
+        .map(|(row, y)| {
+            let Constraint::Linear(b) = row else {
+                unreachable!()
+            };
+            y * if y >= 0. { b.lower } else { b.upper }
+        })
+        .sum();
+    assert!(contradiction > 0.);
 }

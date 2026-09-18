@@ -4,15 +4,19 @@
 //! Shared model mutations account for Hessian fill and gradient recovery.
 
 use crate::{
-    core::model::{Model, RowDomain},
+    model::{Model, RowDomain},
     problem::Bounds,
 };
 use std::time::Instant;
 
+#[path = "doubleton_chains.rs"]
+mod doubleton_chains;
+
 impl Model {
     /// Equality substitution with bounded stable alternatives and sparse-work scoring.
-    pub fn short_equalities(&mut self, max_fill: usize, deadline: Instant) {
-        let options = self.equalities;
+    pub fn short_equalities(&mut self, deadline: Instant) {
+        let max_fill = self.settings.substitution_fill;
+        let options = self.settings.equalities;
         let relative = if options.relative_pivot > 0.0 && options.relative_pivot <= 1.0 {
             options.relative_pivot
         } else {
@@ -41,18 +45,24 @@ impl Model {
                 self.equality_stats.structural_rejections += 1;
                 continue;
             }
-            let largest = row.iter().map(|(_, a)| a.abs()).fold(0.0, f64::max);
+            // The bound and Hessian tests reject most candidates; load the
+            // column header and the row maximum only for the survivors.
+            let mut largest = None;
             candidates.clear();
             for (j, a) in row {
-                let degree = self.a.column(j).len();
                 if (options.require_free_variable && self.bounds[j] != Bounds::FREE)
                     || (options.require_linear_variable && !self.objective.p.column(j).is_empty())
-                    || degree < options.min_column_length
-                    || degree > options.max_column_length
                 {
                     self.equality_stats.structural_rejections += 1;
                     continue;
                 }
+                let degree = self.a.column(j).len();
+                if degree < options.min_column_length || degree > options.max_column_length {
+                    self.equality_stats.structural_rejections += 1;
+                    continue;
+                }
+                let largest = *largest
+                    .get_or_insert_with(|| row.iter().map(|(_, a)| a.abs()).fold(0.0, f64::max));
                 if a.abs() < largest && (relative == 1.0 || a.abs() / largest < relative) {
                     self.equality_stats.pivot_rejections += 1;
                     continue;
@@ -125,7 +135,7 @@ impl Model {
                     break;
                 }
                 self.equality_stats.rejected_updates += 1;
-                use crate::core::objective::SubstitutionFailure;
+                use crate::model::objective::SubstitutionFailure;
                 match self.substitution_failure {
                     SubstitutionFailure::Numerical => self.equality_stats.numerical_rejections += 1,
                     SubstitutionFailure::ConstraintFill => {
@@ -177,11 +187,13 @@ impl Model {
         }
     }
 
-    pub fn singleton_columns(&mut self, max_fill: usize) {
+    pub fn singleton_columns(&mut self) {
+        let max_fill = self.settings.substitution_fill;
         // A neighbour's bound may make this column implied free without
         // changing its own degree. Inspect each affected row once per round.
-        for i in self.queues.singleton_activity_rows.take_round() {
-            if self.rows[i] == RowDomain::Deleted {
+        for i in self.queues.changed_activities.take_singleton_round() {
+            // A deleted row has no entries, so its singleton count is zero.
+            if self.a.row_singletons(i) == 0 {
                 continue;
             }
             for (j, _) in self.a.row(i) {
@@ -262,8 +274,15 @@ impl Model {
         }
     }
 
-    pub fn doubleton_equalities(&mut self, max_fill: usize) {
-        for i in self.queues.doubleton_rows.take_round() {
+    pub fn doubleton_equalities(&mut self) {
+        let round = self.queues.doubleton_rows.take_round();
+        self.batch_doubleton_chains(&round);
+        self.doubleton_round(round);
+    }
+
+    fn doubleton_round(&mut self, round: Vec<usize>) {
+        let max_fill = self.settings.substitution_fill;
+        for i in round {
             if self.deadline.is_some_and(|d| Instant::now() >= d) {
                 break;
             }

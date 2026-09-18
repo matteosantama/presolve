@@ -1,11 +1,10 @@
 //! Public solution recovery and mappings between original, working, and reduced coordinates.
 mod solution;
-pub(crate) mod tape;
 
 pub use solution::{CertificateRef, PrimalCertificate, Solution, SolutionMut, SolutionRef};
 
+use crate::model::tape::{Point, Recovery, RecoveryTape};
 use std::sync::Arc;
-use tape::{Point, Recovery, RecoveryTape};
 
 /// Working indices remain stable through rules; auxiliary variables are appended.
 /// These maps lift compact reduced coordinates into that working index space.
@@ -35,28 +34,94 @@ pub struct Postsolve {
     pub(crate) original_columns: usize,
     pub(crate) direct_slacks: Vec<(usize, usize)>,
 }
-pub(crate) fn original_point(
-    mut p: Point,
-    n: usize,
-    linear: &[usize],
-    conic: &[usize],
-    slack: Vec<f64>,
-) -> Solution {
-    p.x.truncate(n);
-    p.z.truncate(n);
-    let conic_dual = conic.iter().map(|&i| -p.y[i]).collect();
-    let y = if conic.is_empty() {
-        p.y.truncate(linear.len());
-        p.y
-    } else {
-        linear.iter().map(|&i| p.y[i]).collect()
-    };
-    Solution {
-        x: p.x,
-        z: p.z,
-        y,
-        conic_dual,
-        conic_slack: slack,
+/// The caller's original layout: a column prefix of the working point plus
+/// the input positions of its linear rows and cone coordinates. A conic
+/// multiplier is stored negated in the working point.
+pub(crate) struct OriginalMap<'a> {
+    pub columns: usize,
+    pub linear: &'a [usize],
+    pub conic: &'a [usize],
+}
+impl OriginalMap<'_> {
+    /// Original coordinates of a working point, taking its buffers.
+    pub(crate) fn gather(&self, mut p: Point, conic_slack: Vec<f64>) -> Solution {
+        p.x.truncate(self.columns);
+        p.z.truncate(self.columns);
+        let conic_dual = self.conic.iter().map(|&i| -p.y[i]).collect();
+        let y = if self.conic.is_empty() {
+            p.y.truncate(self.linear.len());
+            p.y
+        } else {
+            self.linear.iter().map(|&i| p.y[i]).collect()
+        };
+        Solution {
+            x: p.x,
+            z: p.z,
+            y,
+            conic_dual,
+            conic_slack,
+        }
+    }
+    /// Original multipliers of a working point: linear rows, bounds, cones.
+    pub(crate) fn gather_dual(&self, p: &Point) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        (
+            self.linear.iter().map(|&i| p.y[i]).collect(),
+            p.z[..self.columns].to_vec(),
+            self.conic.iter().map(|&i| -p.y[i]).collect(),
+        )
+    }
+    fn gather_into(&self, p: &Point, slacks: &[f64], out: SolutionMut<'_>) {
+        out.x.copy_from_slice(&p.x[..self.columns]);
+        out.z.copy_from_slice(&p.z[..self.columns]);
+        for (&i, v) in self.linear.iter().zip(out.y) {
+            *v = p.y[i];
+        }
+        for (&i, v) in self.conic.iter().zip(out.conic_dual) {
+            *v = -p.y[i];
+        }
+        for (&i, v) in self.conic.iter().zip(out.conic_slack) {
+            *v = slacks[i];
+        }
+    }
+    fn scatter(&self, p: &mut Point, s: SolutionRef<'_>) {
+        p.x[..self.columns].copy_from_slice(s.x);
+        p.z[..self.columns].copy_from_slice(s.z);
+        for (&i, &v) in self.linear.iter().zip(s.y) {
+            p.y[i] = v;
+        }
+        for (&i, &v) in self.conic.iter().zip(s.conic_dual) {
+            p.y[i] = -v;
+        }
+    }
+}
+impl Coordinates {
+    /// Compact reduced coordinates into the stable working point.
+    fn scatter(&self, p: &mut Point, s: SolutionRef<'_>) {
+        for (&j, &v) in self.compact_to_stable_columns.iter().zip(s.x) {
+            p.x[j] = v;
+        }
+        for (&j, &v) in self.compact_to_stable_columns.iter().zip(s.z) {
+            p.z[j] = v;
+        }
+        for (&i, &v) in self.compact_to_stable_linear_rows.iter().zip(s.y) {
+            p.y[i] = v;
+        }
+        for (&i, &v) in self.compact_to_stable_conic_rows.iter().zip(s.conic_dual) {
+            p.y[i] = -v;
+        }
+    }
+    /// Compact coordinates of a working point, as `(x, z, y, conic_dual)`.
+    fn gather(&self, p: &Point) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+        let pick = |map: &[usize], from: &[f64]| map.iter().map(|&k| from[k]).collect();
+        (
+            pick(&self.compact_to_stable_columns, &p.x),
+            pick(&self.compact_to_stable_columns, &p.z),
+            pick(&self.compact_to_stable_linear_rows, &p.y),
+            self.compact_to_stable_conic_rows
+                .iter()
+                .map(|&i| -p.y[i])
+                .collect(),
+        )
     }
 }
 impl Postsolve {
@@ -68,23 +133,16 @@ impl Postsolve {
     pub fn original_conic_rows(&self) -> &[usize] {
         &self.input_conic
     }
-    fn scatter(&self, p: &mut Point, x: &[f64], y: &[f64], z: &[f64], w: &[f64]) {
-        for (&j, &v) in self.coordinates.compact_to_stable_columns.iter().zip(x) {
-            p.x[j] = v;
-        }
-        for (&j, &v) in self.coordinates.compact_to_stable_columns.iter().zip(z) {
-            p.z[j] = v;
-        }
-        for (&i, &v) in self.coordinates.compact_to_stable_linear_rows.iter().zip(y) {
-            p.y[i] = v;
-        }
-        for (&i, &v) in self.coordinates.compact_to_stable_conic_rows.iter().zip(w) {
-            p.y[i] = -v;
+    fn original(&self) -> OriginalMap<'_> {
+        OriginalMap {
+            columns: self.original_columns,
+            linear: &self.input_linear,
+            conic: &self.input_conic,
         }
     }
-    fn lift(&self, x: &[f64], y: &[f64], z: &[f64], w: &[f64]) -> Point {
+    fn lift(&self, s: SolutionRef<'_>) -> Point {
         let mut p = Point::zeros(self.total_columns, self.total_rows);
-        self.scatter(&mut p, x, y, z, w);
+        self.coordinates.scatter(&mut p, s);
         p
     }
     pub fn workspace(&self) -> Workspace {
@@ -109,6 +167,8 @@ impl Postsolve {
             conic_slack: vec![0.; self.input_conic.len()],
         }
     }
+    /// Original/reduced coordinate pairs whose slacks survive without a
+    /// coordinate transformation. Use `reduce_warm_start` for the full map.
     pub fn surviving_conic_coordinates(&self) -> &[(usize, usize)] {
         &self.direct_slacks
     }
@@ -122,7 +182,7 @@ impl Postsolve {
         p.x.fill(0.);
         p.y.fill(0.);
         p.z.fill(0.);
-        self.scatter(p, point.x, point.y, point.z, point.conic_dual);
+        self.coordinates.scatter(p, point);
         work.slacks.fill(0.);
         for (&i, &v) in self
             .coordinates
@@ -134,17 +194,7 @@ impl Postsolve {
         }
         self.tape
             .recover_with_slacks(p, Recovery::Solution, &mut work.slacks);
-        out.x.copy_from_slice(&p.x[..self.original_columns]);
-        out.z.copy_from_slice(&p.z[..self.original_columns]);
-        for (&i, v) in self.input_linear.iter().zip(out.y) {
-            *v = p.y[i];
-        }
-        for (&i, v) in self.input_conic.iter().zip(out.conic_dual) {
-            *v = -p.y[i];
-        }
-        for (&i, v) in self.input_conic.iter().zip(out.conic_slack) {
-            *v = work.slacks[i];
-        }
+        self.original().gather_into(p, &work.slacks, out);
     }
     /// Allocating convenience wrapper around `recover_into`.
     pub fn recover_solution(&self, point: SolutionRef<'_>) -> Solution {
@@ -153,68 +203,58 @@ impl Postsolve {
         out
     }
     pub fn recover_primal_ray(&self, x: &[f64]) -> Vec<f64> {
-        let mut p = self.lift(x, &[], &[], &[]);
+        let mut p = self.lift(SolutionRef {
+            x,
+            y: &[],
+            z: &[],
+            conic_dual: &[],
+            conic_slack: &[],
+        });
         self.tape.recover(&mut p, Recovery::DualInfeasibility);
         p.x.truncate(self.original_columns);
         p.x
     }
     pub fn recover_primal_certificate(&self, c: CertificateRef<'_>) -> PrimalCertificate {
-        let mut p = self.lift(&[], c.y, c.z, c.conic_dual);
+        let mut p = self.lift(SolutionRef {
+            x: &[],
+            y: c.y,
+            z: c.z,
+            conic_dual: c.conic_dual,
+            conic_slack: &[],
+        });
         self.tape.recover(&mut p, Recovery::PrimalInfeasibility);
-        let p = original_point(
-            p,
-            self.original_columns,
-            &self.input_linear,
-            &self.input_conic,
-            Vec::new(),
-        );
-        PrimalCertificate {
-            y: p.y,
-            z: p.z,
-            conic_dual: p.conic_dual,
-        }
+        let (y, z, conic_dual) = self.original().gather_dual(&p);
+        PrimalCertificate { y, z, conic_dual }
     }
     pub fn reduce_warm_start(&self, point: SolutionRef<'_>) -> Solution {
         let mut p = Point::zeros(self.total_columns, self.total_rows);
-        p.x[..self.original_columns].copy_from_slice(point.x);
-        p.z[..self.original_columns].copy_from_slice(point.z);
-        for (&i, &v) in self.input_linear.iter().zip(point.y) {
-            p.y[i] = v;
-        }
-        for (&i, &v) in self.input_conic.iter().zip(point.conic_dual) {
-            p.y[i] = -v;
-        }
+        self.original().scatter(&mut p, point);
         self.tape.reduce_point(&mut p);
+        let (x, z, y, conic_dual) = self.coordinates.gather(&p);
+        let conic_slack =
+            if !self.input_conic.is_empty() && self.tape.transforms_conic_coordinates() {
+                let mut slacks = vec![0.0; self.total_rows];
+                for (&row, &value) in self.input_conic.iter().zip(point.conic_slack) {
+                    slacks[row] = value;
+                }
+                self.tape.reduce_slacks(&mut slacks);
+                self.coordinates
+                    .compact_to_stable_conic_rows
+                    .iter()
+                    .map(|&row| slacks[row])
+                    .collect()
+            } else {
+                self.direct_slacks
+                    .iter()
+                    .map(|&(original, _)| point.conic_slack[original])
+                    .collect()
+            };
         Solution {
-            x: self
-                .coordinates
-                .compact_to_stable_columns
-                .iter()
-                .map(|&j| p.x[j])
-                .collect(),
-            z: self
-                .coordinates
-                .compact_to_stable_columns
-                .iter()
-                .map(|&j| p.z[j])
-                .collect(),
-            y: self
-                .coordinates
-                .compact_to_stable_linear_rows
-                .iter()
-                .map(|&i| p.y[i])
-                .collect(),
-            conic_dual: self
-                .coordinates
-                .compact_to_stable_conic_rows
-                .iter()
-                .map(|&i| -p.y[i])
-                .collect(),
-            conic_slack: self
-                .direct_slacks
-                .iter()
-                .map(|&(original, _)| point.conic_slack[original])
-                .collect(),
+            x,
+            z,
+            y,
+            conic_dual,
+            conic_slack,
         }
     }
 }

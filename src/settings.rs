@@ -17,6 +17,8 @@ pub struct Settings {
     pub equalities: EqualitySettings,
     pub dependencies: DependencySettings,
     pub propagation: PropagationSettings,
+    pub dual_propagation: DualPropagationSettings,
+    pub dominated_columns: DominatedColumnSettings,
     pub progress: Progress,
     pub sparsification: SparsificationSettings,
     /// Maximum thread count for parallel fingerprinting and sorting: 1 is serial
@@ -37,6 +39,8 @@ impl Default for Settings {
             equalities: EqualitySettings::default(),
             dependencies: DependencySettings::default(),
             propagation: PropagationSettings::default(),
+            dual_propagation: DualPropagationSettings::default(),
+            dominated_columns: DominatedColumnSettings::default(),
             progress: Progress::default(),
             sparsification: SparsificationSettings::default(),
             threads: 1,
@@ -58,6 +62,8 @@ impl Settings {
             allow_hessian_growth: true,
             rules: Rules {
                 equality_dependencies: true,
+                dual_propagation: true,
+                dominated_columns: true,
                 ..Rules::default()
             },
             equalities: EqualitySettings {
@@ -81,6 +87,10 @@ impl Settings {
                 allow_auxiliary_variables: false,
                 ..SparsificationSettings::default()
             },
+            dominated_columns: DominatedColumnSettings {
+                general_search: true,
+                ..DominatedColumnSettings::default()
+            },
             ..Self::default()
         }
     }
@@ -91,8 +101,17 @@ impl Settings {
 pub struct Rules {
     pub fixed_variables: bool,
     pub empty_columns: bool,
+    /// Minimize a free, row-less column with positive curvature out of the
+    /// objective through its stationarity condition (a Schur complement).
+    pub quadratic_elimination: bool,
     pub empty_rows: bool,
     pub dual_fixing: bool,
+    /// Propagate the dual constraints to find directions along which any
+    /// feasible point can slide onto a row side or a variable bound without
+    /// increasing the objective; each direction is verified exactly before the
+    /// reduction is applied. Off by default: one pass costs about 6% of
+    /// presolve time on the benchmark corpora; the aggressive preset enables it.
+    pub dual_propagation: bool,
     pub singleton_rows: bool,
     pub singleton_columns: bool,
     pub doubleton_equalities: bool,
@@ -102,6 +121,11 @@ pub struct Rules {
     pub redundant_bounds: bool,
     pub parallel_rows: bool,
     pub parallel_columns: bool,
+    /// Fix a linear column whose weight can always be shifted onto another
+    /// column without violating a row or increasing the objective. Off by
+    /// default: the identical-support test costs about 2% of presolve time on
+    /// the benchmark corpora; the aggressive preset enables it.
+    pub dominated_columns: bool,
     pub sparsification: bool,
     /// Structural and constant-block cone rules with finite dual recovery.
     /// Partial PSD faces that can destroy dual attainment are retained.
@@ -112,8 +136,10 @@ impl Rules {
         Self {
             fixed_variables: false,
             empty_columns: false,
+            quadratic_elimination: false,
             empty_rows: false,
             dual_fixing: false,
+            dual_propagation: false,
             singleton_rows: false,
             singleton_columns: false,
             doubleton_equalities: false,
@@ -123,6 +149,7 @@ impl Rules {
             redundant_bounds: false,
             parallel_rows: false,
             parallel_columns: false,
+            dominated_columns: false,
             sparsification: false,
             cones: false,
         }
@@ -133,8 +160,10 @@ impl Default for Rules {
         Self {
             fixed_variables: true,
             empty_columns: true,
+            quadratic_elimination: true,
             empty_rows: true,
             dual_fixing: true,
+            dual_propagation: false,
             singleton_rows: true,
             singleton_columns: true,
             doubleton_equalities: true,
@@ -144,6 +173,7 @@ impl Default for Rules {
             redundant_bounds: true,
             parallel_rows: true,
             parallel_columns: true,
+            dominated_columns: false,
             sparsification: true,
             cones: true,
         }
@@ -239,6 +269,24 @@ pub struct PropagationSettings {
     /// Default allowance: max(A nonzeros / 4, 256) across the extra rounds.
     pub work_limit: WorkLimit,
 }
+impl PropagationSettings {
+    /// Replace invalid gain thresholds by their documented defaults.
+    pub(crate) fn sanitized(self) -> Self {
+        let valid = |value: f64, default| {
+            if value.is_finite() && value >= 0.0 {
+                value
+            } else {
+                default
+            }
+        };
+        Self {
+            minimum_relative_gain: valid(self.minimum_relative_gain, 0.01),
+            minimum_gain_factor: valid(self.minimum_gain_factor, 1e4),
+            ..self
+        }
+    }
+}
+
 impl Default for PropagationSettings {
     fn default() -> Self {
         Self {
@@ -267,6 +315,25 @@ impl Default for Progress {
             minimum_reduction: 0.05,
         }
     }
+}
+
+/// Work allowance for the single dual propagation pass after the final phases.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DualPropagationSettings {
+    /// Default: four times the constraint nonzeros, counting column visits;
+    /// direction extraction shares the same allowance.
+    pub work_limit: WorkLimit,
+}
+
+/// Search scope for dominated columns.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DominatedColumnSettings {
+    /// Also search from each column's shortest row, finding pairs with nested
+    /// or overlapping supports. The default only tests columns of identical
+    /// support, which the parallel-column scan already groups at no extra cost.
+    pub general_search: bool,
+    /// Default: twice the constraint nonzeros, counting visits and merge steps.
+    pub work_limit: WorkLimit,
 }
 
 #[derive(Clone, Copy, Debug)]

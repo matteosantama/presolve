@@ -2,7 +2,7 @@ use presolve::{
     Outcome, Presolver, Settings,
     matrix::CscMatrix,
     postsolve::Solution,
-    problem::{Bounds, Constraint, ProblemData},
+    problem::{Bounds, Constraint, Problem},
     result::PresolveResult,
     settings::Rules,
 };
@@ -11,7 +11,7 @@ const WIDTH: usize = 8;
 // 32,768 constraint entries exercise the parallel path, including row scans.
 const BLOCKS: usize = 2048;
 
-fn problem(blocks: usize, quadratic: bool) -> ProblemData {
+fn problem(blocks: usize, quadratic: bool) -> Problem {
     let n = WIDTH * blocks;
     let mut ai = Vec::new();
     let mut aj = Vec::new();
@@ -31,10 +31,10 @@ fn problem(blocks: usize, quadratic: bool) -> ProblemData {
         }
     }
     let pv = vec![1.; pi.len()];
-    ProblemData {
+    Problem {
         p: quadratic.then(|| CscMatrix::from_triplets(n, n, pi, pj, pv).unwrap()),
         c: vec![-2.; n],
-        objective_constant: 2. * blocks as f64,
+        c0: 2. * blocks as f64,
         a: CscMatrix::from_triplets(2 * blocks, n, ai, aj, av).unwrap(),
         rows: (0..blocks)
             .flat_map(|_| {
@@ -61,16 +61,14 @@ fn problem(blocks: usize, quadratic: bool) -> ProblemData {
     }
 }
 
-fn run(input: &ProblemData, rules: Rules, threads: usize) -> PresolveResult {
-    presolve::presolve(
-        input.clone(),
-        &Settings {
-            rules,
-            threads,
-            ..Settings::default()
-        },
-    )
+fn run(input: &Problem, rules: Rules, threads: usize) -> PresolveResult {
+    Presolver::new(Settings {
+        rules,
+        threads,
+        ..Settings::default()
+    })
     .unwrap()
+    .presolve(input.clone())
 }
 
 fn same_solution(a: &Solution, b: &Solution) {
@@ -81,7 +79,7 @@ fn same_solution(a: &Solution, b: &Solution) {
     assert_eq!(a.conic_slack, b.conic_slack);
 }
 
-fn same_result(a: PresolveResult, b: PresolveResult, input: &ProblemData) {
+fn same_result(a: PresolveResult, b: PresolveResult, input: &Problem) {
     assert!(!a.stats.time_limit_reached && !b.stats.time_limit_reached);
     assert_eq!(a.stats.before, b.stats.before);
     assert_eq!(a.stats.after, b.stats.after);
@@ -102,12 +100,12 @@ fn same_result(a: PresolveResult, b: PresolveResult, input: &ProblemData) {
             let recovered = a.postsolve.recover_solution(ar.as_ref());
             same_solution(&recovered, &b.postsolve.recover_solution(br.as_ref()));
             check_optimum(&recovered);
-            let a = a.problem.into_csc();
-            let b = b.problem.into_csc();
+            let a = a.problem;
+            let b = b.problem;
             assert_eq!(a.a, b.a);
             assert_eq!(a.p, b.p);
             assert_eq!(a.c, b.c);
-            assert_eq!(a.objective_constant, b.objective_constant);
+            assert_eq!(a.c0, b.c0);
             assert_eq!(a.rows, b.rows);
             assert_eq!(a.variable_bounds, b.variable_bounds);
             assert_eq!(a.cones, b.cones);
@@ -265,7 +263,7 @@ fn column(matrix: &CscMatrix, j: usize) -> impl Iterator<Item = (usize, f64)> + 
         .zip(matrix.values()[start..end].iter().copied())
 }
 
-fn collided_rows(classes: usize, width: usize, factor: f64) -> ProblemData {
+fn collided_rows(classes: usize, width: usize, factor: f64) -> Problem {
     let m = 1 + 2 * classes;
     let mut ai = Vec::with_capacity(m * width);
     let mut aj = Vec::with_capacity(m * width);
@@ -286,10 +284,10 @@ fn collided_rows(classes: usize, width: usize, factor: f64) -> ProblemData {
             );
         }
     }
-    ProblemData {
+    Problem {
         p: None,
         c: vec![0.; width],
-        objective_constant: 0.,
+        c0: 0.,
         a: CscMatrix::from_triplets(m, width, ai, aj, av).unwrap(),
         rows: vec![
             Constraint::Linear(Bounds {
@@ -333,7 +331,7 @@ fn hash_collisions_preserve_hidden_classes_with_bounded_comparisons() {
                     &original,
                     &reduced.postsolve.recover_solution(warm.as_ref()),
                 );
-                let data = reduced.problem.into_csc();
+                let data = reduced.problem;
                 if let Some((a, rows)) = reference.as_ref() {
                     assert_eq!(&data.a, a);
                     assert_eq!(&data.rows, rows);
@@ -368,10 +366,10 @@ fn hash_collision_does_not_hide_an_infeasibility_certificate() {
 #[test]
 fn redundant_parallel_row_keeps_warm_start_stationarity_without_tightening() {
     for scale in [1., -2.] {
-        let input = ProblemData {
+        let input = Problem {
             p: None,
             c: vec![2.; 2],
-            objective_constant: 0.,
+            c0: 0.,
             a: CscMatrix::from_triplets(
                 2,
                 2,

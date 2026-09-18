@@ -1,9 +1,9 @@
 //! Bounded exact-arithmetic equality dependencies, without changing A or P
 //! until a complete relation has been established in scratch storage.
 use crate::{
-    core::model::{Model, RowDomain},
     matrix::sparse::Entries,
-    postsolve::tape::{Certificate, Point, Recovery, Rule},
+    model::tape::{Certificate, Rule},
+    model::{Model, RowDomain},
 };
 use std::time::Instant;
 
@@ -67,19 +67,102 @@ fn subtract(target: &Entries, base: &Entries, alpha: f64, out: &mut Entries) -> 
 }
 
 impl Model {
+    /// A row with a private column cannot occur in a linear dependence. Peeling
+    /// is confined to the same eligible equality subsystem as the exact search;
+    /// inequalities and oversized equalities must not contribute to degrees.
+    fn dependency_core(&self, deadline: Instant, work: &mut usize) -> Vec<usize> {
+        let mut rows = Vec::new();
+        let mut entries = 0usize;
+        for (i, domain) in self.rows.iter().enumerate() {
+            if i % 1024 == 0 && Instant::now() >= deadline {
+                return Vec::new();
+            }
+            if !matches!(domain, RowDomain::Linear(b) if b.equality()) {
+                continue;
+            }
+            let length = self.a.row(i).len();
+            if length != 0 && length <= self.settings.dependencies.max_row_length {
+                rows.push(i);
+                entries = entries.saturating_add(length);
+                // The unpeeled search cannot visit beyond this prefix under
+                // the allowance. Do not scan the rest of a large model just
+                // to discover that preprocessing cannot fit either.
+                if entries > *work {
+                    return rows;
+                }
+            }
+        }
+        // For a tiny allowance, spend it on the original search instead of
+        // initializing column scratch. Account for both initialization and
+        // incidence visits, leaving at least half the allowance after counting.
+        let count_cost = entries.saturating_add(self.bounds.len());
+        if rows.len() < 2 || count_cost > *work / 2 {
+            return rows;
+        }
+        // If the subsystem contains every matrix entry, the arena's cached
+        // singleton counts already prove whether any peeling can start. Dense
+        // equality cores avoid column scratch and a redundant incidence scan.
+        if entries == self.a.nnz() && !rows.iter().any(|&i| self.a.row_singletons(i) != 0) {
+            return rows;
+        }
+        *work -= count_cost;
+        let mut degree = vec![0usize; self.bounds.len()];
+        let mut owner = vec![0usize; self.bounds.len()];
+        for (position, &i) in rows.iter().enumerate() {
+            if position % 256 == 0 && Instant::now() >= deadline {
+                return Vec::new();
+            }
+            for (j, _) in self.a.row(i) {
+                degree[j] += 1;
+                owner[j] ^= position;
+            }
+        }
+        let mut leaves: Vec<_> = degree
+            .iter()
+            .enumerate()
+            .filter_map(|(j, &d)| (d == 1).then_some(j))
+            .collect();
+        while let Some(j) = leaves.pop() {
+            if degree[j] != 1 {
+                continue;
+            }
+            let position = owner[j];
+            let i = rows[position];
+            let length = self.a.row(i).len();
+            if length > *work || Instant::now() >= deadline {
+                break;
+            }
+            *work -= length;
+            // XOR identifies the sole remaining row without searching a linked
+            // column. Decrementing every incidence also invalidates queued leaves
+            // from this same row, so no separate removed-row flags are needed.
+            rows[position] = usize::MAX;
+            for (k, _) in self.a.row(i) {
+                degree[k] -= 1;
+                owner[k] ^= position;
+                if degree[k] == 1 {
+                    leaves.push(k);
+                }
+            }
+        }
+        rows.retain(|&i| i != usize::MAX);
+        rows
+    }
+
     pub fn equality_dependencies(&mut self, deadline: Instant) -> Result<usize, Certificate> {
-        let options = self.dependencies;
+        let options = self.settings.dependencies;
         let mut work = options.work_limit.resolve(self.a.nnz().saturating_mul(4));
         if work == 0 || options.max_basis_rows == 0 || options.max_row_length == 0 {
             return Ok(0);
         }
+        let candidates = self.dependency_core(deadline, &mut work);
         let mut basis: Vec<BasisRow> = Vec::new();
         let mut row = Vec::new();
         let mut proof = Vec::new();
         let mut next_row = Vec::new();
         let mut next_proof = Vec::new();
         let mut removed = 0;
-        'rows: for i in 0..self.rows.len() {
+        'rows: for i in candidates {
             if work == 0 || Instant::now() >= deadline {
                 break;
             }
@@ -154,7 +237,7 @@ impl Model {
                         .filter(|e| e.0 != i)
                         .map(|&(j, a)| (j, -a))
                         .collect();
-                    self.replace_row(i, &[], RowDomain::Deleted);
+                    self.clear_row(i);
                     self.postsolve.rules.push(Rule::DependentRow {
                         row: i,
                         coefficients,
@@ -170,15 +253,11 @@ impl Model {
                             (a * b.lower).abs()
                         })
                         .sum();
-                    if rhs.abs() > self.numerics.feasibility * (1.0 + scale) {
-                        let mut point = Point::zeros(self.bounds.len(), self.rows.len());
-                        for &(j, a) in &proof {
-                            point.y[j] = rhs.signum() * a;
-                        }
-                        return Err(Certificate {
-                            mode: Recovery::PrimalInfeasibility,
-                            point,
-                        });
+                    if rhs.abs() > self.settings.numerics.feasibility * (1.0 + scale) {
+                        return Err(self.primal_certificate(
+                            proof.iter().map(|&(j, a)| (j, rhs.signum() * a)),
+                            [],
+                        ));
                     }
                 }
             } else if basis.len() < options.max_basis_rows {

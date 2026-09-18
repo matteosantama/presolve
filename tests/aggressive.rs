@@ -2,7 +2,7 @@ use presolve::{
     Outcome, Presolver, Settings,
     matrix::CscMatrix,
     postsolve::Solution,
-    problem::{Bounds, Constraint, ProblemData},
+    problem::{Bounds, Constraint, Problem},
     settings::{EqualitySettings, Progress, Rules, WorkLimit},
 };
 use std::time::Duration;
@@ -30,15 +30,15 @@ fn settings() -> Settings {
     }
 }
 
-fn equation(n: usize, bounded: bool) -> ProblemData {
-    ProblemData {
+fn equation(n: usize, bounded: bool) -> Problem {
+    Problem {
         p: Some(
             CscMatrix::from_triplets(n, n, (0..n).collect(), (0..n).collect(), vec![1.; n])
                 .unwrap(),
         ),
         // x = 1, y = 1/4, z = 0 satisfies stationarity and feasibility.
         c: vec![-0.75; n],
-        objective_constant: 3.,
+        c0: 3.,
         a: CscMatrix::from_triplets(1, n, vec![0; n], (0..n).collect(), vec![1.; n]).unwrap(),
         rows: vec![Constraint::Linear(Bounds::fixed(n as f64))],
         variable_bounds: vec![
@@ -61,10 +61,10 @@ fn column(a: &CscMatrix, j: usize) -> impl Iterator<Item = (usize, f64)> + '_ {
         .map(|k| (a.row_indices()[k], a.values()[k]))
 }
 
-fn check_kkt(p: &ProblemData, s: &Solution) -> f64 {
+fn check_kkt(p: &Problem, s: &Solution) -> f64 {
     let n = p.c.len();
     let mut gradient = p.c.clone();
-    let mut value = p.objective_constant + p.c.iter().zip(&s.x).map(|(c, x)| c * x).sum::<f64>();
+    let mut value = p.c0 + p.c.iter().zip(&s.x).map(|(c, x)| c * x).sum::<f64>();
     if let Some(h) = &p.p {
         for j in 0..n {
             for (i, a) in column(h, j) {
@@ -134,7 +134,7 @@ fn wide_quadratic_substitution_preserves_objective_kkt_and_retained_bounds() {
             ..warm
         };
         let recovered = r.postsolve.recover_solution(reduced.as_ref());
-        let output = r.problem.into_csc();
+        let output = r.problem;
         let objective = check_kkt(&p, &original);
         assert!((check_kkt(&output, &reduced) - objective).abs() < 1e-8);
         assert!((check_kkt(&p, &recovered) - objective).abs() < 1e-8);
@@ -311,7 +311,6 @@ fn near_dependent_equalities_do_not_create_roundoff_pivots() {
     let Outcome::Unchanged(output) = result.outcome else {
         panic!("ill-conditioned substitutions should be rejected")
     };
-    let output = output.into_csc();
     assert_eq!(output.a, p.a);
     assert_eq!(output.rows, p.rows);
 }
@@ -341,10 +340,10 @@ fn exhaustive_cycles_revisit_equalities_after_pivot_degrees_change() {
 
 #[test]
 fn alternative_pivots_recover_after_a_fill_rejection() {
-    let input = ProblemData {
+    let input = Problem {
         p: None,
         c: vec![0.; 4],
-        objective_constant: 0.,
+        c0: 0.,
         a: CscMatrix::from_triplets(
             3,
             4,
@@ -467,13 +466,13 @@ fn pivot_policies_preserve_known_quadratic_optima() {
                 rhs[i] += value;
             }
         }
-        let input = ProblemData {
+        let input = Problem {
             p: Some(
                 CscMatrix::from_triplets(n, n, (0..n).collect(), (0..n).collect(), vec![1.; n])
                     .unwrap(),
             ),
             c,
-            objective_constant: 3.,
+            c0: 3.,
             a: CscMatrix::from_triplets(
                 m,
                 n,
@@ -509,10 +508,7 @@ fn pivot_policies_preserve_known_quadratic_optima() {
                         let warm = reduced.postsolve.reduce_warm_start(optimum.as_ref());
                         let recovered = reduced.postsolve.recover_solution(warm.as_ref());
                         assert!((check_kkt(&input, &recovered) - objective).abs() < 1e-8);
-                        assert!(
-                            (check_kkt(&reduced.problem.into_csc(), &warm) - objective).abs()
-                                < 1e-8
-                        );
+                        assert!((check_kkt(&reduced.problem, &warm) - objective).abs() < 1e-8);
                     }
                     Outcome::Unchanged(_) => {}
                     outcome => panic!("unexpected {outcome:?}"),
@@ -525,10 +521,10 @@ fn pivot_policies_preserve_known_quadratic_optima() {
 #[test]
 fn propagation_gain_controls_are_independent_and_preserve_dual_recovery() {
     for (rhs, old_upper) in [(1000., 1005.), (1., 1. + 1e-6)] {
-        let input = ProblemData {
+        let input = Problem {
             p: None,
             c: vec![-1., 0.],
-            objective_constant: 0.,
+            c0: 0.,
             a: CscMatrix::from_triplets(1, 2, vec![0, 0], vec![0, 1], vec![1., 1.]).unwrap(),
             rows: vec![Constraint::Linear(Bounds {
                 lower: f64::NEG_INFINITY,
@@ -581,7 +577,7 @@ fn propagation_gain_controls_are_independent_and_preserve_dual_recovery() {
         };
         let recovered = reduced.postsolve.recover_solution(point.as_ref());
         assert_eq!(check_kkt(&input, &recovered), -rhs);
-        let output = reduced.problem.into_csc();
+        let output = reduced.problem;
         assert!(output.variable_bounds.iter().all(|b| b.upper == rhs));
         assert_eq!(check_kkt(&output, &point), -rhs);
     }

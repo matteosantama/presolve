@@ -3,11 +3,11 @@
 //! Propagate implied bounds and remove redundant variable bounds.
 
 use crate::{
-    core::{
+    model::{
+        Model, RowDomain,
         activity::Activity,
-        model::{Model, RowDomain},
+        tape::{Certificate, Equation, Side},
     },
-    postsolve::tape::{Certificate, Equation, Side},
     problem::Bounds,
 };
 use std::sync::Arc;
@@ -69,33 +69,9 @@ impl Model {
             let mut equation = None;
             let mut cursor = self.a.row(i).cursor();
             while let Some((j, a)) = cursor.next(&self.a) {
-                let act = self.activity(i);
-                let (min_term, max_term) = Activity::terms(a, self.bounds[j]);
-                let lower = if bounds.lower.is_finite() {
-                    act.max
-                        .excluding(max_term)
-                        .or_else(|| {
-                            // Any other infinite contribution prevents a finite bound.
-                            (act.max.infinite == usize::from(!max_term.is_finite()))
-                                .then(|| self.residual_activity(i, j).max.value())
-                                .flatten()
-                        })
-                        .map(|v| (bounds.lower - v) / a)
-                } else {
-                    None
-                };
-                let upper = if bounds.upper.is_finite() {
-                    act.min
-                        .excluding(min_term)
-                        .or_else(|| {
-                            (act.min.infinite == usize::from(!min_term.is_finite()))
-                                .then(|| self.residual_activity(i, j).min.value())
-                                .flatten()
-                        })
-                        .map(|v| (bounds.upper - v) / a)
-                } else {
-                    None
-                };
+                let (lower, upper) = self
+                    .activity(i)
+                    .implied(a, self.bounds[j], bounds, || self.residual_activity(i, j));
                 if let Some(value) = lower {
                     tightened += usize::from(self.implied_bound(
                         j,
@@ -138,7 +114,7 @@ impl Model {
                     && (self.bounds[j].lower.is_finite() || self.bounds[j].upper.is_finite())
             })
             .collect();
-        columns.sort_unstable_by_key(|&j| (self.a.column(j).len(), j));
+        self.a.sort_columns_by_length(&mut columns);
         let mut lower_candidates = Vec::new();
         for j in columns {
             let b = self.bounds[j];
@@ -160,32 +136,34 @@ impl Model {
     }
 
     fn remove_redundant_bound(&mut self, j: usize, side: Side) {
+        if self.bound_implied(j, side, true) {
+            self.relax_bound(j, side);
+        }
+    }
+
+    /// Whether one retained linear row and the other variables' current
+    /// bounds already enforce this finite side of column `j`. With
+    /// `recompute`, a row whose cached extreme cannot exclude the column's
+    /// term is recomputed; without it, such a row is skipped, which is
+    /// conservative.
+    pub(super) fn bound_implied(&mut self, j: usize, side: Side, recompute: bool) -> bool {
         let b = self.bounds[j];
+        if !side.value(b).is_finite() {
+            return false;
+        }
         let mut cursor = self.a.column(j).cursor();
         while let Some((i, a)) = cursor.next(&self.a) {
             let RowDomain::Linear(row) = self.rows[i] else {
                 continue;
             };
-            let act = self.activity(i);
-            let (min, max) = Activity::terms(a, b);
-            let from_lower = (side == Side::Lower) == (a > 0.0);
-            let (rhs, extreme, term) = if from_lower {
-                (row.lower, act.max, max)
-            } else {
-                (row.upper, act.min, min)
-            };
-            if !rhs.is_finite() || extreme.infinite != usize::from(!term.is_finite()) {
-                continue;
-            }
-            let residual = extreme.excluding(term).or_else(|| {
-                let residual = self.residual_activity(i, j);
-                if from_lower {
-                    residual.max.value()
+            let bound = self.activity(i).implied_side(a, b, row, side, || {
+                if recompute {
+                    self.residual_activity(i, j)
                 } else {
-                    residual.min.value()
+                    Activity::UNKNOWN
                 }
             });
-            let Some(bound) = residual.map(|v| (rhs - v) / a).filter(|v| v.is_finite()) else {
+            let Some(bound) = bound.filter(|v| v.is_finite()) else {
                 continue;
             };
             let implied = match side {
@@ -193,10 +171,10 @@ impl Model {
                 Side::Upper => bound <= b.upper,
             };
             if implied {
-                self.relax_bound(j, side);
-                break;
+                return true;
             }
         }
+        false
     }
 
     pub(super) fn implied_bound(
@@ -204,10 +182,10 @@ impl Model {
         j: usize,
         side: Side,
         value: f64,
-        proof: impl FnOnce(&Self) -> Arc<Equation>,
+        proof: impl FnOnce(&mut Self) -> Arc<Equation>,
         propagation: bool,
     ) -> Result<bool, Certificate> {
-        if !value.is_finite() || (propagation && value.abs() >= self.numerics.huge_bound) {
+        if !value.is_finite() || (propagation && value.abs() >= self.settings.numerics.huge_bound) {
             return Ok(false);
         }
         let old = self.bounds[j];
@@ -231,6 +209,14 @@ impl Model {
             }
             return Ok(false);
         }
+        // Most calls end here. With `lower <= upper` established, a value
+        // that is not tighter has a nonpositive gain, so the threshold test
+        // below would reject it anyway.
+        if (side == Side::Lower && value <= old.lower)
+            || (side == Side::Upper && value >= old.upper)
+        {
+            return Ok(false);
+        }
         if propagation && side.value(old).is_finite() && value != opposite {
             // Skip insignificant finite changes using a relative threshold
             // and a floor scaled by the configured feasibility tolerance.
@@ -239,22 +225,18 @@ impl Model {
                 Side::Upper => old.upper - value,
             };
             if gain
-                <= (self.propagation.minimum_gain_factor * self.numerics.feasibility)
-                    .max(self.propagation.minimum_relative_gain * side.value(old).abs())
+                <= (self.settings.propagation.minimum_gain_factor
+                    * self.settings.numerics.feasibility)
+                    .max(self.settings.propagation.minimum_relative_gain * side.value(old).abs())
             {
                 return Ok(false);
             }
-        }
-        if (side == Side::Lower && value <= old.lower)
-            || (side == Side::Upper && value >= old.upper)
-        {
-            return Ok(false);
         }
         let equation = proof(self);
         Ok(self.tighten_bound(j, side, value, equation))
     }
 
     pub(super) fn separated(&self, lower: f64, upper: f64) -> bool {
-        lower > upper + self.numerics.feasibility * (1.0 + lower.abs().max(upper.abs()))
+        lower > upper + self.settings.numerics.feasibility * (1.0 + lower.abs().max(upper.abs()))
     }
 }

@@ -2,10 +2,11 @@
 // Modified for this library; copyright and attribution notices are in NOTICE.
 //! Fix known variables and eliminate independent empty columns.
 
-use crate::{
-    core::model::Model,
-    postsolve::tape::{Certificate, Point, Recovery},
-};
+use crate::{model::Model, model::tape::Certificate, problem::Bounds};
+
+/// Beyond this Hessian degree the Schur complement is dense enough that the
+/// no-growth check rejects the elimination anyway.
+const MAX_ELIMINATION_DEGREE: usize = 16;
 
 impl Model {
     pub fn fixed_variables(&mut self) {
@@ -22,6 +23,18 @@ impl Model {
                 continue;
             }
             let Some(p) = self.objective.diagonal(j) else {
+                // A coupled free column has an interior minimizer in closed
+                // form; a bounded one would need a clipped, nonaffine rule.
+                // A rejected elimination is retried only after the Hessian
+                // changed, since the column's fill is a function of `P` alone.
+                if self.settings.rules.quadratic_elimination
+                    && self.bounds[j] == Bounds::FREE
+                    && self.objective.p.row(j).len() <= MAX_ELIMINATION_DEGREE
+                    && self.elimination_rejected[j] != self.objective.p.revision + 1
+                    && !self.eliminate_coupled(j, self.settings.substitution_fill)
+                {
+                    self.elimination_rejected[j] = self.objective.p.revision + 1;
+                }
                 continue;
             };
             if p < 0.0 {
@@ -48,11 +61,6 @@ impl Model {
     }
 
     pub(super) fn recession_certificate(&self, column: usize, direction: f64) -> Certificate {
-        let mut point = Point::zeros(self.bounds.len(), self.rows.len());
-        point.x[column] = direction;
-        Certificate {
-            mode: Recovery::DualInfeasibility,
-            point,
-        }
+        self.dual_certificate([(column, direction)])
     }
 }

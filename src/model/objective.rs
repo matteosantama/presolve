@@ -162,6 +162,14 @@ impl Objective {
             let mut added = 0;
             let mut removed = 2 * self.p.column(k).len() - usize::from(diagonal != 0.0);
             let mut visits = 0usize;
+            // Pairs arrive with `l` increasing for each `j`, so the existing
+            // coefficient comes from a cursor over row `j` of the Hessian
+            // rather than a binary search per pair. The cursor restarts if a
+            // request ever steps backwards, so the value read is always the
+            // stored one.
+            let mut row: &[(usize, f64)] = &[];
+            let mut row_of = usize::MAX;
+            let mut cursor = 0usize;
             let mut update =
                 |j: usize, l: usize, missing: bool| -> Result<(), SubstitutionFailure> {
                     visits += 1;
@@ -171,7 +179,20 @@ impl Objective {
                     }
                     let a = &scratch.affected[j];
                     let b = &scratch.affected[l];
-                    let old = self.p.get(a.column, b.column);
+                    if row_of != j {
+                        row_of = j;
+                        row = self.p.row(a.column);
+                        cursor = 0;
+                    } else if cursor > 0 && row[cursor - 1].0 >= b.column {
+                        cursor = 0;
+                    }
+                    while cursor < row.len() && row[cursor].0 < b.column {
+                        cursor += 1;
+                    }
+                    let old = match row.get(cursor) {
+                        Some(&(column, value)) if column == b.column => value,
+                        _ => 0.0,
+                    };
                     // Each unordered candidate occurs once in each pass. Reject
                     // excessive fill before staging updates to existing positions.
                     if (old == 0.0) != missing {

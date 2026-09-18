@@ -1,5 +1,5 @@
 //! Experimental arena-backed orthogonal lists for the constraint matrix.
-use crate::matrix::sparse::Entries;
+use crate::matrix::{CscMatrix, sparse::Entries};
 const NONE: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug)]
@@ -14,7 +14,8 @@ struct Node {
 struct List {
     head: u32,
     tail: u32,
-    len: usize,
+    // Fits the arena's u32 node ids and keeps a list header at 12 bytes.
+    len: u32,
 }
 impl Default for List {
     fn default() -> Self {
@@ -32,39 +33,46 @@ pub(crate) struct LinkedMatrix {
     free: u32,
     nnz: usize,
     column_cursors: Vec<u32>,
+    /// Number of length-one columns with an entry in each row. A column's
+    /// length crosses one only while it has at most two entries, so the
+    /// count costs O(1) per edit and lets rules skip rows without singletons.
+    row_singletons: Vec<u32>,
 }
+/// A row (`AXIS` 0) or column (`AXIS` 1) of the matrix. The axis is a type
+/// parameter so traversals select the link and index fields at compile time
+/// rather than branching on every node.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct View<'a> {
+pub(crate) struct View<'a, const AXIS: usize> {
     matrix: &'a LinkedMatrix,
     list: List,
-    axis: usize,
 }
 #[derive(Clone)]
-pub(crate) struct Iter<'a> {
+pub(crate) struct Iter<'a, const AXIS: usize> {
     matrix: &'a LinkedMatrix,
-    cursor: Cursor,
+    cursor: Cursor<AXIS>,
     remaining: usize,
 }
 #[derive(Clone, Copy)]
-pub(crate) struct Cursor {
+pub(crate) struct Cursor<const AXIS: usize> {
     next: u32,
-    axis: usize,
 }
-impl Cursor {
+impl<const AXIS: usize> Cursor<AXIS> {
+    #[inline]
     pub fn next(&mut self, matrix: &LinkedMatrix) -> Option<(usize, f64)> {
         if self.next == NONE {
             return None;
         }
         let node = matrix.nodes[self.next as usize];
-        self.next = node.next[self.axis];
+        self.next = node.next[AXIS];
         Some((
-            if self.axis == 0 { node.col } else { node.row } as usize,
+            if AXIS == 0 { node.col } else { node.row } as usize,
             node.value,
         ))
     }
 }
-impl Iterator for Iter<'_> {
+impl<const AXIS: usize> Iterator for Iter<'_, AXIS> {
     type Item = (usize, f64);
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         let entry = self.cursor.next(self.matrix)?;
         self.remaining -= 1;
@@ -74,21 +82,23 @@ impl Iterator for Iter<'_> {
         (self.remaining, Some(self.remaining))
     }
 }
-impl ExactSizeIterator for Iter<'_> {}
-impl<'a> View<'a> {
+impl<const AXIS: usize> ExactSizeIterator for Iter<'_, AXIS> {}
+impl<'a, const AXIS: usize> View<'a, AXIS> {
+    #[inline]
     pub fn len(self) -> usize {
-        self.list.len
+        self.list.len as usize
     }
     pub fn is_empty(self) -> bool {
         self.len() == 0
     }
-    pub fn cursor(self) -> Cursor {
+    #[inline]
+    pub fn cursor(self) -> Cursor<AXIS> {
         Cursor {
             next: self.list.head,
-            axis: self.axis,
         }
     }
-    pub fn iter(self) -> Iter<'a> {
+    #[inline]
+    pub fn iter(self) -> Iter<'a, AXIS> {
         Iter {
             matrix: self.matrix,
             cursor: self.cursor(),
@@ -99,21 +109,21 @@ impl<'a> View<'a> {
         self.iter().collect()
     }
 }
-impl<'a> IntoIterator for View<'a> {
+impl<'a, const AXIS: usize> IntoIterator for View<'a, AXIS> {
     type Item = (usize, f64);
-    type IntoIter = Iter<'a>;
+    type IntoIter = Iter<'a, AXIS>;
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
 }
 #[cfg(test)]
-impl PartialEq for View<'_> {
+impl<const AXIS: usize> PartialEq for View<'_, AXIS> {
     fn eq(&self, rhs: &Self) -> bool {
         self.iter().eq(rhs.iter())
     }
 }
 #[cfg(test)]
-impl<const N: usize> PartialEq<[(usize, f64); N]> for View<'_> {
+impl<const AXIS: usize, const N: usize> PartialEq<[(usize, f64); N]> for View<'_, AXIS> {
     fn eq(&self, rhs: &[(usize, f64); N]) -> bool {
         self.iter().eq(rhs.iter().copied())
     }
@@ -127,6 +137,7 @@ impl LinkedMatrix {
             free: NONE,
             nnz: 0,
             column_cursors: vec![NONE; columns],
+            row_singletons: vec![0; rows],
         }
     }
     pub fn from_columns<I: Iterator<Item = (usize, f64)>>(
@@ -134,32 +145,37 @@ impl LinkedMatrix {
         columns: usize,
         column: impl Fn(usize) -> I,
     ) -> Self {
-        let visit = |f: &mut dyn FnMut(usize, usize, f64)| {
+        // A generic visitor lets both passes inline the caller's column
+        // iterator instead of paying an indirect call per nonzero.
+        fn visit<I: Iterator<Item = (usize, f64)>>(
+            columns: usize,
+            column: &impl Fn(usize) -> I,
+            mut f: impl FnMut(usize, usize, f64),
+        ) {
             for j in 0..columns {
                 for (i, v) in column(j) {
                     f(i, j, v);
                 }
             }
-        };
+        }
         let mut out = Self::zeros(rows, columns);
         // Presolve repeatedly scans complete rows. Lay the arena out in row
         // order while retaining sorted links in both dimensions.
-        visit(&mut |row, _, value| {
+        visit(columns, &column, |row, _, value| {
             if value != 0.0 {
                 out.lists[0][row].len += 1;
             }
         });
-        let mut offsets = Vec::with_capacity(rows);
         let mut nnz = 0;
         for list in &mut out.lists[0] {
-            offsets.push(nnz);
             if list.len != 0 {
                 list.head = u32::try_from(nnz).unwrap();
-                list.tail = u32::try_from(nnz + list.len - 1).unwrap();
+                list.tail = u32::try_from(nnz + list.len as usize - 1).unwrap();
             }
-            nnz += list.len;
+            nnz += list.len as usize;
         }
         assert!(nnz < NONE as usize);
+        let mut offsets: Vec<u32> = out.lists[0].iter().map(|list| list.head).collect();
         out.nodes = vec![
             Node {
                 value: 0.0,
@@ -170,34 +186,41 @@ impl LinkedMatrix {
             };
             nnz
         ];
-        visit(&mut |row, col, value| {
-            if value == 0.0 {
-                return;
+        // The next nonzero of the same column is placed at its row's current
+        // offset, since nothing else is placed in between, so each node is
+        // written once with all four links and no earlier node is revisited.
+        for col in 0..columns {
+            let mut entries = column(col).filter(|&(_, v)| v != 0.0).peekable();
+            let mut tail = NONE;
+            let mut len = 0;
+            while let Some((row, value)) = entries.next() {
+                let id = offsets[row];
+                offsets[row] += 1;
+                let row_list = out.lists[0][row];
+                let next = entries.peek().map_or(NONE, |&(r, _)| offsets[r]);
+                out.nodes[id as usize] = Node {
+                    value,
+                    row: row as u32,
+                    col: col as u32,
+                    prev: [if id == row_list.head { NONE } else { id - 1 }, tail],
+                    next: [if id == row_list.tail { NONE } else { id + 1 }, next],
+                };
+                if tail == NONE {
+                    out.lists[1][col].head = id;
+                }
+                tail = id;
+                len += 1;
             }
-            let id = offsets[row] as u32;
-            offsets[row] += 1;
-            let row_list = out.lists[0][row];
-            let col_list = &mut out.lists[1][col];
-            out.nodes[id as usize] = Node {
-                value,
-                row: row as u32,
-                col: col as u32,
-                prev: [
-                    if id == row_list.head { NONE } else { id - 1 },
-                    col_list.tail,
-                ],
-                next: [if id == row_list.tail { NONE } else { id + 1 }, NONE],
-            };
-            if col_list.tail == NONE {
-                col_list.head = id;
-            } else {
-                out.nodes[col_list.tail as usize].next[1] = id;
-            }
-            col_list.tail = id;
-            col_list.len += 1;
-            out.column_cursors[col] = id;
-        });
+            out.lists[1][col].tail = tail;
+            out.lists[1][col].len = len;
+            out.column_cursors[col] = tail;
+        }
         out.nnz = nnz;
+        for list in &out.lists[1] {
+            if list.len == 1 {
+                out.row_singletons[out.nodes[list.head as usize].row as usize] += 1;
+            }
+        }
         out
     }
     pub fn add_column(&mut self) -> usize {
@@ -209,19 +232,98 @@ impl LinkedMatrix {
     pub fn nnz(&self) -> usize {
         self.nnz
     }
-    pub fn row(&self, row: usize) -> View<'_> {
+    /// Every entry in arena order, which is row order right after
+    /// construction. Only valid while no node has been released.
+    pub fn storage_entries(&self) -> impl Iterator<Item = (usize, usize, f64)> + '_ {
+        assert_eq!(self.free, NONE, "arena has released nodes");
+        self.nodes
+            .iter()
+            .map(|node| (node.row as usize, node.col as usize, node.value))
+    }
+    /// Pack `rows`, in that order, into CSC over the compact columns given by
+    /// `stable_to_compact` (`usize::MAX` marks a removed column). Column list
+    /// lengths give the pointers directly, so no counting pass is needed;
+    /// entries in rows outside `rows` are dropped by a compaction that only
+    /// runs if any exist.
+    pub fn pack(&self, rows: &[usize], stable_to_compact: &[usize], columns: usize) -> CscMatrix {
+        let mut pointers = vec![0; columns + 1];
+        for (j, &compact) in stable_to_compact.iter().enumerate() {
+            if compact != usize::MAX {
+                pointers[compact + 1] = self.lists[1][j].len as usize;
+            }
+        }
+        for j in 0..columns {
+            pointers[j + 1] += pointers[j];
+        }
+        let nnz = pointers[columns];
+        let mut next = pointers[..columns].to_vec();
+        let mut ri = vec![0; nnz];
+        let mut values = vec![0.; nnz];
+        let mut filled = 0;
+        for (i, &row) in rows.iter().enumerate() {
+            for (j, v) in self.row(row).iter() {
+                let j = stable_to_compact[j];
+                let at = next[j];
+                ri[at] = i;
+                values[at] = v;
+                next[j] += 1;
+                filled += 1;
+            }
+        }
+        if filled != nnz {
+            let mut packed = vec![0; columns + 1];
+            let mut indices = Vec::with_capacity(filled);
+            let mut vals = Vec::with_capacity(filled);
+            for j in 0..columns {
+                indices.extend_from_slice(&ri[pointers[j]..next[j]]);
+                vals.extend_from_slice(&values[pointers[j]..next[j]]);
+                packed[j + 1] = indices.len();
+            }
+            return CscMatrix::from_parts(rows.len(), columns, packed, indices, vals);
+        }
+        CscMatrix::from_parts(rows.len(), columns, pointers, ri, values)
+    }
+    pub fn row(&self, row: usize) -> View<'_, 0> {
         View {
             matrix: self,
             list: self.lists[0][row],
-            axis: 0,
         }
     }
-    pub fn column(&self, col: usize) -> View<'_> {
+    pub fn column(&self, col: usize) -> View<'_, 1> {
         View {
             matrix: self,
             list: self.lists[1][col],
-            axis: 1,
         }
+    }
+    /// Count of the row's entries whose column has exactly one entry.
+    pub fn row_singletons(&self, row: usize) -> usize {
+        self.row_singletons[row] as usize
+    }
+
+    /// Stable counting sort of column indices by column length. Callers pass
+    /// ascending indices, so the result is the (length, index) order without
+    /// a comparison sort over every column of a large model.
+    pub fn sort_columns_by_length(&self, columns: &mut Vec<usize>) {
+        debug_assert!(columns.windows(2).all(|pair| pair[0] < pair[1]));
+        let longest = columns
+            .iter()
+            .map(|&j| self.lists[1][j].len as usize)
+            .max()
+            .unwrap_or(0);
+        let mut starts = vec![0; longest + 2];
+        for &j in columns.iter() {
+            starts[self.lists[1][j].len as usize + 1] += 1;
+        }
+        for length in 0..=longest {
+            starts[length + 1] += starts[length];
+        }
+        let mut sorted = vec![0; columns.len()];
+        for &j in columns.iter() {
+            let slot = &mut starts[self.lists[1][j].len as usize];
+            sorted[*slot] = j;
+            *slot += 1;
+        }
+        *columns = sorted;
     }
     fn key(&self, node: u32, axis: usize) -> usize {
         let n = &self.nodes[node as usize];
@@ -333,6 +435,15 @@ impl LinkedMatrix {
         }
         self.column_cursors[col] = id;
         self.nnz += 1;
+        match self.lists[1][col].len {
+            1 => self.row_singletons[row] += 1,
+            2 => {
+                // The previously lone entry is no longer a singleton.
+                let other = if prev[1] == NONE { next[1] } else { prev[1] };
+                self.row_singletons[self.nodes[other as usize].row as usize] -= 1;
+            }
+            _ => {}
+        }
     }
     fn remove(&mut self, id: u32) {
         let node = self.nodes[id as usize];
@@ -363,6 +474,14 @@ impl LinkedMatrix {
         self.nodes[id as usize].next[0] = self.free;
         self.free = id;
         self.nnz -= 1;
+        match self.lists[1][node.col as usize].len {
+            0 => self.row_singletons[node.row as usize] -= 1,
+            1 => {
+                let head = self.lists[1][node.col as usize].head;
+                self.row_singletons[self.nodes[head as usize].row as usize] += 1;
+            }
+            _ => {}
+        }
     }
     #[cfg(test)]
     pub fn set(&mut self, row: usize, col: usize, value: f64) {
@@ -380,7 +499,7 @@ impl LinkedMatrix {
     }
     #[cfg(test)]
     pub fn remove_row(&mut self, row: usize) -> Entries {
-        let mut entries = Vec::with_capacity(self.lists[0][row].len);
+        let mut entries = Vec::with_capacity(self.lists[0][row].len as usize);
         while self.lists[0][row].head != NONE {
             let id = self.lists[0][row].head;
             let node = self.nodes[id as usize];
@@ -390,7 +509,7 @@ impl LinkedMatrix {
         entries
     }
     pub fn remove_column(&mut self, col: usize) -> Entries {
-        let mut entries = Vec::with_capacity(self.lists[1][col].len);
+        let mut entries = Vec::with_capacity(self.lists[1][col].len as usize);
         while self.lists[1][col].head != NONE {
             let id = self.lists[1][col].head;
             let node = self.nodes[id as usize];
@@ -400,18 +519,19 @@ impl LinkedMatrix {
         entries
     }
     /// Keep existing nodes and their column links while merging a sorted row.
-    /// Save the old coefficients only when the caller needs them for lock updates.
+    /// Save the old coefficients only when the caller needs them for lock
+    /// updates; the caller's buffer is cleared first so it can be reused.
     fn update_row<const SAVE: bool, const TRACK: bool>(
         &mut self,
         row: usize,
         entries: &[(usize, f64)],
+        old: &mut Entries,
         touched: &mut Vec<usize>,
-    ) -> Entries {
-        let mut old = if SAVE {
-            Vec::with_capacity(self.lists[0][row].len)
-        } else {
-            Vec::new()
-        };
+    ) {
+        old.clear();
+        if SAVE {
+            old.reserve(self.lists[0][row].len as usize);
+        }
         let mut at = self.lists[0][row].head;
         for &(col, value) in entries {
             debug_assert!(value.is_finite() && value != 0.0);
@@ -456,18 +576,25 @@ impl LinkedMatrix {
             self.remove(at);
             at = node.next[0];
         }
-        old
     }
 
+    /// Replace a row, leaving its previous sorted coefficients in `old`.
+    pub fn replace_row_into(&mut self, row: usize, entries: &[(usize, f64)], old: &mut Entries) {
+        self.update_row::<true, false>(row, entries, old, &mut Vec::new());
+    }
+
+    #[cfg(test)]
     pub fn replace_row(&mut self, row: usize, entries: &[(usize, f64)]) -> Entries {
-        self.update_row::<true, false>(row, entries, &mut Vec::new())
+        let mut old = Vec::new();
+        self.replace_row_into(row, entries, &mut old);
+        old
     }
 
     pub fn replace_rows(&mut self, mut updates: Vec<(usize, Entries)>) -> Vec<usize> {
         updates.sort_unstable_by_key(|(row, _)| *row);
         let mut touched = Vec::new();
         for (row, entries) in updates {
-            self.update_row::<false, true>(row, &entries, &mut touched);
+            self.update_row::<false, true>(row, &entries, &mut Vec::new(), &mut touched);
         }
         touched.sort_unstable();
         touched.dedup();
@@ -478,6 +605,24 @@ impl LinkedMatrix {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn packing_skips_removed_columns_and_preserves_row_count_when_filtering() {
+        let a =
+            LinkedMatrix::from_columns(4, 3, |j| (0..4).map(move |i| (i, (1 + i + 4 * j) as f64)));
+        // Filtering rows can leave packed column segments shorter than their
+        // original linked lengths; the result still has two rows, not six.
+        let packed = a.pack(&[1, 3], &[0, 1, 2], 3);
+        assert_eq!(packed.rows(), 2);
+        assert_eq!(packed.column_pointers(), [0, 2, 4, 6]);
+        assert_eq!(packed.row_indices(), [0, 1, 0, 1, 0, 1]);
+        let mut a = a;
+        a.remove_column(1);
+        let packed = a.pack(&[1, 3], &[0, usize::MAX, 1], 2);
+        assert_eq!(packed.rows(), 2);
+        assert_eq!(packed.column_pointers(), [0, 2, 4]);
+        assert_eq!(packed.values(), [2., 4., 10., 12.]);
+    }
+
     #[test]
     fn row_replacement_retains_live_nodes_and_returns_original_coefficients() {
         let mut a = LinkedMatrix::zeros(3, 5);
@@ -496,6 +641,23 @@ mod tests {
         assert_eq!(a.remove_row(1), [(1, 3.0), (2, 4.0), (3, 5.0)]);
         a.replace_row(1, &[(0, 7.0), (2, 8.0), (4, 9.0)]);
         assert_eq!(a.column(2).to_vec(), [(0, 1.0), (1, 8.0), (2, 1.0)]);
+    }
+
+    #[test]
+    fn column_length_order_matches_a_comparison_sort() {
+        let a = LinkedMatrix::from_columns(7, 40, |j| {
+            (0..7)
+                .filter(move |i| (i * 3 + j) % (j % 5 + 1) == 0)
+                .map(|i| (i, 1.0))
+        });
+        let mut columns: Vec<_> = (0..40).filter(|j| j % 3 != 1).collect();
+        let mut expected = columns.clone();
+        expected.sort_unstable_by_key(|&j| (a.column(j).len(), j));
+        a.sort_columns_by_length(&mut columns);
+        assert_eq!(columns, expected);
+        let mut empty = Vec::new();
+        a.sort_columns_by_length(&mut empty);
+        assert!(empty.is_empty());
     }
 
     #[test]
@@ -569,6 +731,12 @@ mod tests {
                 }
             }
             assert_eq!(a.nnz(), count);
+            for (i, row) in dense.iter().enumerate() {
+                let singletons = (0..17)
+                    .filter(|&j| row[j] != 0.0 && dense.iter().filter(|r| r[j] != 0.0).count() == 1)
+                    .count();
+                assert_eq!(a.row_singletons(i), singletons);
+            }
             assert!(a.nodes.len() <= 13 * 17);
             for axis in 0..2 {
                 for list in &a.lists[axis] {
@@ -583,7 +751,7 @@ mod tests {
                         assert!(visited <= a.nnz());
                     }
                     assert_eq!(previous, list.tail);
-                    assert_eq!(visited, list.len);
+                    assert_eq!(visited, list.len as usize);
                 }
             }
         }

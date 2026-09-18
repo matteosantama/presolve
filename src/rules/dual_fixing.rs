@@ -3,8 +3,8 @@
 //! Use objective derivatives and constraint locks to fix variables.
 
 use crate::{
-    core::model::Model,
-    postsolve::tape::{Certificate, Side},
+    model::Model,
+    model::tape::{Certificate, Side},
 };
 
 impl Model {
@@ -71,7 +71,10 @@ impl Model {
     /// One scan per medium phase avoids tracking every Hessian neighbour on
     /// every bound change, which would be expensive for dense objectives.
     pub fn coupled_dual_fix(&mut self) {
-        if self.objective.p.nnz() == 0 {
+        // The scan reads locks, bounds, costs, and the Hessian, all of which
+        // bump the revision; a repeat on an unchanged model finds nothing.
+        let input = self.revision;
+        if self.objective.p.nnz() == 0 || self.coupled_fix_seen == input {
             return;
         }
         for j in 0..self.alive.len() {
@@ -116,6 +119,9 @@ impl Model {
                     break;
                 }
             }
+        }
+        if self.revision == input {
+            self.coupled_fix_seen = input;
         }
     }
 }

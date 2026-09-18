@@ -2,7 +2,7 @@ use crate::results::{Case, Measurement, Metadata, RunWriter};
 use crate::{Kind, PoolMode, Preset, Result, Selection, SparsificationMode, Tuning, data};
 use presolve::{
     Presolver,
-    problem::ProblemData,
+    problem::Problem,
     result::Outcome,
     settings::{Rules, Settings},
 };
@@ -21,11 +21,13 @@ macro_rules! rules {
     };
 }
 
-const RULES: [(&str, Rules); 16] = rules!(
+const RULES: [(&str, Rules); 19] = rules!(
     fixed_variables,
     empty_columns,
+    quadratic_elimination,
     empty_rows,
     dual_fixing,
+    dual_propagation,
     singleton_rows,
     singleton_columns,
     doubleton_equalities,
@@ -35,6 +37,7 @@ const RULES: [(&str, Rules); 16] = rules!(
     redundant_bounds,
     parallel_rows,
     parallel_columns,
+    dominated_columns,
     sparsification,
     cones,
 );
@@ -97,6 +100,19 @@ pub fn settings(rule: &str, threads: usize, tuning: &Tuning) -> Result<Settings>
         settings.rules.sparsification &= !matches!(mode, SparsificationMode::Off);
         settings.sparsification.allow_auxiliary_variables = matches!(mode, SparsificationMode::All);
     }
+    for name in &tuning.without {
+        match name.as_str() {
+            "dual_propagation" => settings.rules.dual_propagation = false,
+            "dominated_columns" => settings.rules.dominated_columns = false,
+            "quadratic_elimination" => settings.rules.quadratic_elimination = false,
+            "redundant_bounds" => settings.rules.redundant_bounds = false,
+            "sparsification" => settings.rules.sparsification = false,
+            "parallel_rows" => settings.rules.parallel_rows = false,
+            "parallel_columns" => settings.rules.parallel_columns = false,
+            "bound_propagation" => settings.rules.bound_propagation = false,
+            other => return Err(format!("cannot disable rule '{other}' with --without").into()),
+        }
+    }
     Ok(settings)
 }
 
@@ -108,7 +124,7 @@ fn bound_sides(bounds: impl IntoIterator<Item = presolve::problem::Bounds>) -> u
 }
 
 pub fn measure(
-    input: ProblemData,
+    input: Problem,
     settings: &Settings,
     timed: bool,
     mode: PoolMode,
@@ -243,6 +259,10 @@ fn trial(
         (
             "--sparsification",
             tuning.sparsification.map(|v| v.as_str().to_owned()),
+        ),
+        (
+            "--without",
+            (!tuning.without.is_empty()).then(|| tuning.without.join(",")),
         ),
     ] {
         if let Some(value) = value {

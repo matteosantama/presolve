@@ -3,8 +3,8 @@
 //! Eliminate empty rows and turn singleton rows into variable bounds.
 
 use crate::{
-    core::model::{Model, RowDomain},
-    postsolve::tape::{Certificate, Point, Recovery, Side},
+    model::tape::{Certificate, Side},
+    model::{Model, RowDomain},
 };
 
 impl Model {
@@ -32,6 +32,9 @@ impl Model {
 
     pub fn singleton_rows(&mut self) -> Result<(), Certificate> {
         while let Some(i) = self.queues.singleton_rows.pop() {
+            if self.a.row(i).len() != 1 {
+                continue;
+            }
             let Some(equation) = self.equation(i) else {
                 continue;
             };
@@ -55,15 +58,11 @@ impl Model {
         Ok(())
     }
 
+    /// A single row separated from its side, with the matching bound multipliers.
     pub(super) fn row_certificate(&self, row: usize, multiplier: f64) -> Certificate {
-        let mut point = Point::zeros(self.bounds.len(), self.rows.len());
-        point.y[row] = multiplier;
-        for (j, a) in self.a.row(row) {
-            point.z[j] = -a * multiplier;
-        }
-        Certificate {
-            mode: Recovery::PrimalInfeasibility,
-            point,
-        }
+        self.primal_certificate(
+            [(row, multiplier)],
+            self.a.row(row).iter().map(|(j, a)| (j, -a * multiplier)),
+        )
     }
 }

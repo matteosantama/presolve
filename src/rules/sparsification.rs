@@ -1,11 +1,10 @@
 //! Bounded row cancellation on the native ranged model. Row/column storage,
 //! bound proofs, cleanup queues, and postsolve are shared with other rules.
 use crate::{
-    core::model::{Model, RowDomain, shifted},
     matrix::sparse::Entries,
-    postsolve::tape::Rule,
+    model::tape::Rule,
+    model::{Model, RowDomain, shifted},
     problem::Bounds,
-    settings::SparsificationSettings,
 };
 use std::time::Instant;
 
@@ -17,11 +16,30 @@ fn packed_sides(bounds: Bounds) -> usize {
     }
 }
 
+/// Per-row state of one reference row's candidate scan.
+#[derive(Clone, Copy)]
+struct Scan {
+    seen: u32,
+    count: u32,
+    ratio: f64,
+}
+
+impl Default for Scan {
+    fn default() -> Self {
+        Self {
+            seen: u32::MAX,
+            ratio: 0.0,
+            count: 0,
+        }
+    }
+}
+
 fn worth_cancelling(length: usize, count: usize) -> bool {
     let required = if length < 20 { 10 } else { length / 2 };
     count.saturating_mul(2) >= length.saturating_add(required)
 }
 
+#[inline]
 fn subtract<I: Iterator<Item = (usize, f64)> + Clone>(
     base: I,
     other: I,
@@ -59,11 +77,14 @@ fn subtract<I: Iterator<Item = (usize, f64)> + Clone>(
 }
 
 impl Model {
-    pub fn sparsify_rows(&mut self, deadline: Instant, options: SparsificationSettings) -> usize {
+    pub fn sparsify_rows(&mut self, deadline: Instant) -> usize {
+        let options = self.settings.sparsification;
         let m = self.rows.len();
-        let mut seen = vec![usize::MAX; m];
-        let mut ratios = vec![0.0; m];
-        let mut counts = vec![0usize; m];
+        // One record per row keeps the three scan fields on the same cache
+        // line; the scan touches them together for every column entry. Most
+        // problems have no reference row at all, so the table is allocated
+        // on the first one.
+        let mut scan: Vec<Scan> = Vec::new();
         let mut candidates = Vec::new();
         // Bounds were explicit rows in the standalone pass. Include their
         // eventual packed entries when preserving its linear work allowance.
@@ -107,6 +128,10 @@ impl Model {
                 continue;
             }
             let minimum_ratio = (1e-10 / minimum).max(1e-6);
+            if scan.is_empty() {
+                scan = vec![Scan::default(); m];
+            }
+            let seen = reference as u32;
             candidates.clear();
             'scan: for (j, value) in base {
                 work += 1;
@@ -118,31 +143,32 @@ impl Model {
                     if i == reference || i >= m || !matches!(self.rows[i], RowDomain::Linear(_)) {
                         continue;
                     }
-                    if seen[i] != reference {
-                        seen[i] = reference;
-                        ratios[i] = 0.0;
-                        counts[i] = 0;
+                    let scan = &mut scan[i];
+                    if scan.seen != seen {
+                        scan.seen = seen;
+                        scan.ratio = 0.0;
+                        scan.count = 0;
                         candidates.push(i);
                     }
                     let ratio = other / value;
                     if !ratio.is_finite() {
                         continue;
                     }
-                    if counts[i] == 0 {
-                        ratios[i] = if ratio.abs() > minimum_ratio && ratio.abs() < 1e4 {
+                    if scan.count == 0 {
+                        scan.ratio = if ratio.abs() > minimum_ratio && ratio.abs() < 1e4 {
                             ratio
                         } else {
                             0.0
                         };
-                        counts[i] = 1;
+                        scan.count = 1;
                     } else if ratio.abs() <= minimum_ratio {
-                        ratios[i] = 0.0;
-                        counts[i] = 0;
-                    } else if (ratio - ratios[i]).abs() < 1e-10 {
-                        counts[i] += 1;
-                    } else if ratio.abs() < ratios[i].abs() {
-                        ratios[i] = ratio;
-                        counts[i] = 1;
+                        scan.ratio = 0.0;
+                        scan.count = 0;
+                    } else if (ratio - scan.ratio).abs() < 1e-10 {
+                        scan.count += 1;
+                    } else if ratio.abs() < scan.ratio.abs() {
+                        scan.ratio = ratio;
+                        scan.count = 1;
                     }
                 }
             }
@@ -150,7 +176,7 @@ impl Model {
             let mut targets = Vec::new();
             let mut saving = 0isize;
             for &i in &candidates {
-                if !worth_cancelling(length, counts[i]) {
+                if !worth_cancelling(length, scan[i].count as usize) {
                     continue;
                 }
                 let cost = 3usize.saturating_mul(base.len() + self.a.row(i).len() + 1);
@@ -158,7 +184,7 @@ impl Model {
                     continue;
                 }
                 work += cost;
-                let alpha = ratios[i];
+                let alpha = scan[i].ratio;
                 let Some(mut row) = subtract(base.iter(), self.a.row(i).iter(), alpha) else {
                     continue;
                 };

@@ -2,15 +2,24 @@
 // Modified for this library; copyright and attribution notices are in NOTICE.
 //! Mutable working model and shared rule transformations. Every mutation
 //! updates sparse views, locks, dirty activities, and rule queues together.
+//! Rule families in `crate::rules` drive the mutations; the recovery tape
+//! records them for `crate::postsolve` to reverse.
+//! Native dual signs satisfy:
+//! `P x + c = A^T y + z`, with positive multipliers on lower bounds.
+
+pub(crate) mod activity;
+pub(crate) mod objective;
+pub(crate) mod queues;
+pub(crate) mod tape;
 
 use crate::{
-    core::{
-        activity::{Activity, Locks},
+    matrix::{linked::LinkedMatrix, sparse::Entries},
+    model::{
+        activity::{Activity, Extreme, Locks},
         objective::Objective,
         queues::Queues,
+        tape::{Certificate, Equation, Point, Recovery, RecoveryTape, Rule, Side},
     },
-    matrix::{linked::LinkedMatrix, sparse::Entries},
-    postsolve::tape::{Equation, RecoveryTape, Rule, Side},
     problem::Bounds,
 };
 use std::{sync::Arc, time::Instant};
@@ -32,20 +41,75 @@ pub(crate) struct Model {
     pub locks: Vec<Locks>,
     pub queues: Queues,
     pub postsolve: RecoveryTape,
-    activities: Vec<Option<Activity>>,
+    /// Cached row activities; a stale entry carries the `STALE` marker
+    /// instead of an `Option` discriminant, keeping the array at 32 bytes
+    /// per row for the scattered accesses made on every bound change.
+    activities: Vec<Activity>,
+    /// Previous coefficients of the row being replaced, kept between calls
+    /// so row edits do not allocate a fresh copy each time.
+    row_scratch: Entries,
+    /// One `RowKind` byte per row, refreshed by `changed_row`. A bound change
+    /// visits every incident row's queue eligibility; the byte replaces reads
+    /// of the wider domain and list-header arrays for that decision.
+    row_kinds: Vec<u8>,
+    /// Snapshot of each linear row for the tape, shared until the row's
+    /// coefficients or sides change. Repeated propagation rounds over an
+    /// unchanged row then reuse one copy instead of taking one per round.
+    equations: Vec<Option<Arc<Equation>>>,
     pub revision: usize,
-    pub rules: crate::settings::Rules,
-    pub numerics: crate::settings::Numerics,
-    pub propagation: crate::settings::PropagationSettings,
-    pub equalities: crate::settings::EqualitySettings,
-    pub dependencies: crate::settings::DependencySettings,
+    /// Bumped by every row-domain or matrix edit, but not by variable-bound
+    /// changes; the parallel-row scan reads nothing else.
+    pub rows_revision: usize,
+    /// Revision at which the last fruitless parallel-row / parallel-column
+    /// scan ran, so an exact repeat on an unchanged model is skipped.
+    pub parallel_rows_seen: usize,
+    pub parallel_columns_seen: usize,
+    pub coupled_fix_seen: usize,
+    /// Run configuration, applied once by `configure`.
+    pub settings: crate::settings::Settings,
+    pub dual_scratch: crate::rules::dual_propagation::DualScratch,
+    pub dominated_scratch: crate::rules::dominated_columns::DominatedScratch,
     pub equality_stats: crate::result::EqualityStats,
-    pub substitution_failure: super::objective::SubstitutionFailure,
-    pub allow_hessian_growth: bool,
+    pub substitution_failure: self::objective::SubstitutionFailure,
+    /// Hessian revision plus one at which a coupled column's elimination was
+    /// last rejected, so cleanup does not retry it on every visit.
+    pub elimination_rejected: Vec<usize>,
     pub deadline: Option<Instant>,
     pub cones: Vec<crate::problem::Cone>,
     pub cone_rows: Vec<Vec<usize>>,
-    pub changed_cones: crate::core::queues::Worklist,
+    pub changed_cones: crate::model::queues::Worklist,
+}
+
+/// A row never has this many infinite terms, so the count marks a cached
+/// activity that must be recomputed before use.
+const STALE: usize = usize::MAX;
+
+/// Queue eligibility of a row on a bound change, derived from its domain
+/// and length. Every domain or length change ends in `changed_row`, which
+/// keeps the classification current.
+mod row_kind {
+    pub const OTHER: u8 = 0;
+    pub const CONE: u8 = 1;
+    pub const DOUBLETON_EQUALITY: u8 = 2;
+    pub const LONGER_EQUALITY: u8 = 3;
+}
+
+fn stale() -> Activity {
+    Activity {
+        min: Extreme {
+            sum: 0.0,
+            infinite: STALE,
+        },
+        max: Extreme::default(),
+    }
+}
+
+/// Shift a cached activity for a bound change of one of its terms, marking
+/// it stale when the incremental update would lose precision.
+fn shift_cached(activity: &mut Activity, a: f64, old: Bounds, new: Bounds) {
+    if activity.min.infinite != STALE && !activity.replace_bound(a, old, new) {
+        *activity = stale();
+    }
 }
 
 /// Translate a right-hand side under x_k = offset + ... . Infinite sides
@@ -97,38 +161,65 @@ impl Model {
     ) -> Self {
         let n = bounds.len();
         let m = rows.len();
+        // Lock counts are order independent, so sweep the arena in storage
+        // order rather than chasing row links. The row seeding mirrors
+        // `changed_row` without rewriting the freshly initialised caches;
+        // push order per queue is the same.
+        let mut locks = vec![Locks::default(); n];
+        for (row, col, value) in a.storage_entries() {
+            locks[col].add(Locks::contribution(value, rows[row]));
+        }
+        let mut queues = Queues::new(m, n);
+        let mut changed_cones = crate::model::queues::Worklist::new(0);
+        let mut row_kinds = vec![row_kind::OTHER; m];
+        for i in 0..m {
+            let domain = rows[i];
+            if let RowDomain::Cone { block, .. } = domain {
+                changed_cones.push(block);
+            }
+            let length = a.row(i).len();
+            let equality = matches!(domain, RowDomain::Linear(b) if b.equality());
+            row_kinds[i] = match domain {
+                RowDomain::Cone { .. } => row_kind::CONE,
+                RowDomain::Linear(_) if equality && length == 2 => row_kind::DOUBLETON_EQUALITY,
+                RowDomain::Linear(_) if equality && length >= 3 => row_kind::LONGER_EQUALITY,
+                _ => row_kind::OTHER,
+            };
+            if domain != RowDomain::Deleted {
+                queues.row_changed(i, length, equality);
+            }
+        }
         let mut model = Self {
             a,
             objective,
             rows,
             bounds,
             alive: vec![true; n],
-            locks: vec![Locks::default(); n],
-            queues: Queues::new(m, n),
+            locks,
+            queues,
             postsolve: RecoveryTape::default(),
-            activities: vec![None; m],
+            activities: vec![stale(); m],
+            row_scratch: Vec::new(),
+            row_kinds,
+            equations: vec![None; m],
             revision: 0,
-            rules: crate::settings::Rules::default(),
-            numerics: crate::settings::Numerics::default(),
-            propagation: crate::settings::PropagationSettings::default(),
-            equalities: crate::settings::EqualitySettings::default(),
-            dependencies: crate::settings::DependencySettings::default(),
+            rows_revision: 0,
+            parallel_rows_seen: usize::MAX,
+            parallel_columns_seen: usize::MAX,
+            coupled_fix_seen: usize::MAX,
+            settings: crate::settings::Settings::default(),
+            dual_scratch: Default::default(),
+            dominated_scratch: Default::default(),
             equality_stats: crate::result::EqualityStats::default(),
-            substitution_failure: super::objective::SubstitutionFailure::Numerical,
-            allow_hessian_growth: false,
+            substitution_failure: self::objective::SubstitutionFailure::Numerical,
+            elimination_rejected: vec![0; n],
             deadline: None,
             cones: vec![],
             cone_rows: vec![],
-            changed_cones: crate::core::queues::Worklist::new(0),
+            changed_cones,
         };
-        for i in 0..m {
-            for (j, a) in model.a.row(i) {
-                model.locks[j].add(Locks::contribution(a, model.rows[i]));
-            }
-            model.changed_row(i);
-        }
         for j in 0..n {
-            model.queues.column_changed(j, model.a.column(j).len());
+            model.column_changed(j);
             if model.bounds[j].equality() {
                 model.queues.fixed_columns.push(j);
             }
@@ -136,8 +227,29 @@ impl Model {
         model
     }
 
+    /// A linear column: alive, absent from the Hessian, and absent from every
+    /// conic row, so its reduced cost is `c_j - Σ a_ij y_i` over linear rows.
+    pub fn linear_column(&self, j: usize) -> bool {
+        self.alive[j]
+            && self.objective.p.column(j).is_empty()
+            && (self.cones.is_empty()
+                || self
+                    .a
+                    .column(j)
+                    .iter()
+                    .all(|(i, _)| matches!(self.rows[i], RowDomain::Linear(_))))
+    }
+
+    /// Apply the caller's settings once; rules read them from `self.settings`.
+    pub fn configure(&mut self, settings: &crate::settings::Settings, deadline: Option<Instant>) {
+        self.settings = settings.clone();
+        self.settings.propagation = settings.propagation.sanitized();
+        self.deadline = deadline;
+    }
+
     pub fn add_variable(&mut self, bounds: Bounds) -> usize {
         let j = self.a.add_column();
+        self.elimination_rejected.push(0);
         self.objective.p.add_variable();
         self.objective.c.push(0.0);
         self.bounds.push(bounds);
@@ -163,7 +275,7 @@ impl Model {
         }
         for j in self.a.replace_rows(matrix_updates) {
             if self.alive[j] {
-                self.queues.column_changed(j, self.a.column(j).len());
+                self.column_changed(j);
             }
         }
         // Domain changes also affect locks of coefficients that stayed equal.
@@ -176,67 +288,168 @@ impl Model {
         }
     }
 
-    pub fn equation(&self, row: usize) -> Option<Arc<Equation>> {
+    pub fn equation(&mut self, row: usize) -> Option<Arc<Equation>> {
         let RowDomain::Linear(bounds) = self.rows[row] else {
             return None;
         };
-        Some(Arc::new(Equation {
-            row,
-            entries: self.a.row(row).to_vec(),
-            bounds,
-        }))
+        let equation = self.equations[row].get_or_insert_with(|| {
+            Arc::new(Equation {
+                row,
+                entries: self.a.row(row).to_vec(),
+                bounds,
+            })
+        });
+        Some(Arc::clone(equation))
     }
 
+    #[inline]
     fn changed_row(&mut self, row: usize) {
-        if let RowDomain::Cone { block, .. } = self.rows[row] {
+        self.rows_revision += 1;
+        let domain = self.rows[row];
+        if let RowDomain::Cone { block, .. } = domain {
             self.changed_cones.push(block);
         }
-        self.activities[row] = None;
-        if self.rows[row] != RowDomain::Deleted {
-            self.queues.row_changed(
-                row,
-                self.a.row(row).len(),
-                matches!(self.rows[row], RowDomain::Linear(b) if b.equality()),
-            );
+        self.activities[row] = stale();
+        self.equations[row] = None;
+        let length = self.a.row(row).len();
+        let equality = matches!(domain, RowDomain::Linear(b) if b.equality());
+        self.row_kinds[row] = match domain {
+            RowDomain::Cone { .. } => row_kind::CONE,
+            RowDomain::Linear(_) if equality && length == 2 => row_kind::DOUBLETON_EQUALITY,
+            RowDomain::Linear(_) if equality && length >= 3 => row_kind::LONGER_EQUALITY,
+            _ => row_kind::OTHER,
+        };
+        if domain != RowDomain::Deleted {
+            self.queues.row_changed(row, length, equality);
         }
     }
 
     /// Structural edits are infrequent relative to activity queries. Cache
     /// activities until an incident bound or coefficient changes; recomputing
     /// dirty rows also avoids cumulative subtract/add cancellation error.
+    #[inline]
     pub fn activity(&mut self, row: usize) -> Activity {
-        *self.activities[row]
-            .get_or_insert_with(|| Activity::compute(self.a.row(row), &self.bounds, None))
+        if self.activities[row].min.infinite == STALE {
+            self.activities[row] = Activity::compute(self.a.row(row), &self.bounds);
+        }
+        self.activities[row]
     }
 
-    pub fn residual_activity(&mut self, row: usize, column: usize) -> Activity {
+    pub fn residual_activity(&self, row: usize, column: usize) -> Activity {
         // This direct path is the cancellation fallback for the propagation
         // rule, which first tries subtracting from cached extremes.
-        Activity::compute(self.a.row(row), &self.bounds, Some(column))
+        Activity::compute_excluding(self.a.row(row), &self.bounds, column)
     }
 
     pub(super) fn replace_row(&mut self, row: usize, entries: &[(usize, f64)], domain: RowDomain) {
-        let old = self.a.replace_row(row, entries);
+        let mut old = std::mem::take(&mut self.row_scratch);
+        self.a.replace_row_into(row, entries, &mut old);
+        let previous = std::mem::replace(&mut self.rows[row], domain);
+        // Both supports are sorted, so merge them. A column whose lock
+        // contribution is unchanged would only be decremented and then
+        // incremented by the same amount, so it is left alone. Removed and
+        // retained columns are queued first, in the old support's order; a
+        // retained column is already queued by then, so the second pass
+        // only visits columns that are new to the row.
+        let mut next = 0;
         for &(j, a) in &old {
-            self.locks[j].remove(Locks::contribution(a, self.rows[row]));
-        }
-        self.rows[row] = domain;
-        for &(j, a) in entries {
-            self.locks[j].add(Locks::contribution(a, domain));
-        }
-        for &(j, _) in old.iter().chain(entries) {
-            if self.alive[j] {
-                self.queues.column_changed(j, self.a.column(j).len());
+            let removed = Locks::contribution(a, previous);
+            while next < entries.len() && entries[next].0 < j {
+                let (k, b) = entries[next];
+                self.locks[k].add(Locks::contribution(b, domain));
+                next += 1;
+            }
+            if next < entries.len() && entries[next].0 == j {
+                let added = Locks::contribution(entries[next].1, domain);
+                if added != removed {
+                    self.locks[j].remove(removed);
+                    self.locks[j].add(added);
+                }
+                next += 1;
+            } else {
+                self.locks[j].remove(removed);
             }
         }
+        for &(k, b) in &entries[next..] {
+            self.locks[k].add(Locks::contribution(b, domain));
+        }
+        for &(j, _) in &old {
+            if self.alive[j] {
+                self.column_changed(j);
+            }
+        }
+        let mut next = 0;
+        for &(j, _) in entries {
+            while next < old.len() && old[next].0 < j {
+                next += 1;
+            }
+            if next < old.len() && old[next].0 == j {
+                next += 1;
+                continue;
+            }
+            if self.alive[j] {
+                self.column_changed(j);
+            }
+        }
+        self.row_scratch = old;
         self.changed_row(row);
         self.revision += 1;
     }
 
-    pub fn delete_row(&mut self, row: usize) {
-        assert!(matches!(self.rows[row], RowDomain::Linear(_)));
+    /// Remove a row's coefficients and retire its domain, without a record;
+    /// the caller pushes the rule that explains the row's multiplier.
+    pub(super) fn clear_row(&mut self, row: usize) {
+        debug_assert!(self.rows[row] != RowDomain::Deleted);
         self.replace_row(row, &[], RowDomain::Deleted);
+    }
+
+    /// Delete a row whose multiplier is simply zeroed on recovery.
+    pub fn delete_row(&mut self, row: usize) {
+        self.clear_row(row);
         self.postsolve.rules.push(Rule::DeletedRow(row));
+    }
+
+    fn column_changed(&mut self, j: usize) {
+        self.queues.column_changed(j, self.a.column(j).len());
+    }
+
+    /// A zero point in working coordinates, for certificates and probes.
+    pub(crate) fn point(&self) -> Point {
+        Point::zeros(self.bounds.len(), self.rows.len())
+    }
+
+    /// Farkas certificate with multipliers `y` on rows and `z` on columns.
+    pub(super) fn primal_certificate(
+        &self,
+        y: impl IntoIterator<Item = (usize, f64)>,
+        z: impl IntoIterator<Item = (usize, f64)>,
+    ) -> Certificate {
+        let mut point = self.point();
+        for (i, v) in y {
+            point.y[i] = v;
+        }
+        for (j, v) in z {
+            point.z[j] = v;
+        }
+        Certificate {
+            mode: Recovery::PrimalInfeasibility,
+            point,
+        }
+    }
+
+    /// Recession direction with the given nonzero components.
+    pub(super) fn dual_certificate(
+        &self,
+        x: impl IntoIterator<Item = (usize, f64)>,
+    ) -> Certificate {
+        let mut point = self.point();
+        for (j, v) in x {
+            point.x[j] = v;
+        }
+        Certificate {
+            mode: Recovery::DualInfeasibility,
+            point,
+        }
     }
 
     fn set_bounds(&mut self, column: usize, bounds: Bounds) {
@@ -244,42 +457,44 @@ impl Model {
         if bounds.equality() {
             self.queues.fixed_columns.push(column);
         }
+        let require_free = self.settings.equalities.require_free_variable;
         for (i, a) in self.a.column(column) {
-            if self.activities[i]
-                .as_mut()
-                .is_some_and(|activity| !activity.replace_bound(a, old, bounds))
-            {
-                self.activities[i] = None;
-            }
+            shift_cached(&mut self.activities[i], a, old, bounds);
             self.queues.changed_activities.push(i);
-            if let RowDomain::Cone { block, .. } = self.rows[i] {
-                self.changed_cones.push(block);
-            }
-            self.queues.singleton_activity_rows.push(i);
-            if !self.equalities.require_free_variable
-                && matches!(self.rows[i], RowDomain::Linear(b) if b.equality())
-                && self.a.row(i).len() >= 3
-            {
-                self.queues.short_equalities.push(i);
-            }
-            if matches!(self.rows[i],RowDomain::Linear(b) if b.equality())
-                && self.a.row(i).len() == 2
-            {
-                self.queues.doubleton_rows.push(i);
+            // The kind byte decides the remaining queues, so the wider domain
+            // is only read for a cone row's block.
+            match self.row_kinds[i] {
+                row_kind::CONE => {
+                    if let RowDomain::Cone { block, .. } = self.rows[i] {
+                        self.changed_cones.push(block);
+                    }
+                }
+                row_kind::LONGER_EQUALITY if !require_free => {
+                    self.queues.short_equalities.push(i);
+                }
+                row_kind::DOUBLETON_EQUALITY => self.queues.doubleton_rows.push(i),
+                _ => {}
             }
         }
-        self.queues
-            .column_changed(column, self.a.column(column).len());
+        self.column_changed(column);
         self.revision += 1;
     }
 
+    /// Only the final redundant-bound pass relaxes bounds, after every rule
+    /// that drains a work queue has finished. Cached activities and the
+    /// revision must stay consistent for the remaining columns of that pass;
+    /// queue entries would never be consumed, so `set_bounds` is not used.
     pub fn relax_bound(&mut self, column: usize, side: Side) {
         let mut bounds = self.bounds[column];
         match side {
             Side::Lower => bounds.lower = f64::NEG_INFINITY,
             Side::Upper => bounds.upper = f64::INFINITY,
         }
-        self.set_bounds(column, bounds);
+        let old = std::mem::replace(&mut self.bounds[column], bounds);
+        for (i, a) in self.a.column(column) {
+            shift_cached(&mut self.activities[i], a, old, bounds);
+        }
+        self.revision += 1;
     }
 
     /// The rule checks feasibility and the implication proof before
@@ -315,15 +530,16 @@ impl Model {
     /// No state changes if any transformed coefficient would be nonfinite.
     pub fn fix(&mut self, column: usize, value: f64) -> bool {
         assert!(self.alive[column]);
-        let Some(updates) = self
+        // `shifted` is pure, so check every row first and recompute while
+        // applying rather than collecting the domains.
+        if !self
             .a
             .column(column)
             .iter()
-            .map(|(i, a)| shifted(self.rows[i], a * value).map(|domain| (i, domain)))
-            .collect::<Option<Vec<_>>>()
-        else {
+            .all(|(i, a)| shifted(self.rows[i], a * value).is_some())
+        {
             return false;
-        };
+        }
         let Some(gradient) = self
             .objective
             .substitute(column, value, &[], 0, false, None)
@@ -331,15 +547,23 @@ impl Model {
             return false;
         };
         for &(j, _) in &gradient.terms {
-            self.queues.column_changed(j, self.a.column(j).len());
+            self.column_changed(j);
         }
         self.alive[column] = false;
+        let bounds = self.bounds[column];
         let entries = self.a.remove_column(column);
-        for ((i, domain), &(row, a)) in updates.into_iter().zip(&entries) {
-            debug_assert_eq!(i, row);
+        for &(i, a) in &entries {
+            let domain = shifted(self.rows[i], a * value).expect("checked above");
             self.locks[column].remove(Locks::contribution(a, self.rows[i]));
             self.rows[i] = domain;
+            // Keep the cached activity warm: the removed term is the column's
+            // old contribution, so subtracting it is the same incremental
+            // update a bound change makes. Rules that fix many columns of
+            // shared long rows would otherwise recompute those rows each time.
+            let mut kept = self.activities[i];
+            shift_cached(&mut kept, a, bounds, Bounds::fixed(0.0));
             self.changed_row(i);
+            self.activities[i] = kept;
         }
         self.postsolve.rules.push(Rule::Fixed {
             column,
@@ -381,13 +605,18 @@ impl Model {
         effective_bounds: Bounds,
         max_fill: usize,
     ) -> bool {
-        let Some(mut equation) = self.equation(row) else {
-            return false;
-        };
-        if !side.is_finite() || !self.alive[column] {
+        if !matches!(self.rows[row], RowDomain::Linear(_))
+            || !side.is_finite()
+            || !self.alive[column]
+        {
             return false;
         }
-        Arc::make_mut(&mut equation).bounds = Bounds::fixed(side);
+        // The tape needs the row at the chosen side, not the shared snapshot.
+        let equation = Arc::new(Equation {
+            row,
+            entries: self.a.row(row).to_vec(),
+            bounds: Bounds::fixed(side),
+        });
         self.substitute_equation(column, equation, effective_bounds, max_fill)
     }
 
@@ -398,7 +627,7 @@ impl Model {
         effective_bounds: Bounds,
         max_fill: usize,
     ) -> bool {
-        use super::objective::SubstitutionFailure;
+        use self::objective::SubstitutionFailure;
         self.substitution_failure = SubstitutionFailure::Numerical;
         let row = equation.row;
         let pivot = self.a.get(row, column);
@@ -510,7 +739,7 @@ impl Model {
             offset,
             &slopes,
             max_fill - fill,
-            self.allow_hessian_growth,
+            self.settings.allow_hessian_growth,
             self.deadline,
         ) {
             Ok(gradient) => gradient,
@@ -520,7 +749,7 @@ impl Model {
             }
         };
         for &(j, _) in gradient.terms.iter().chain(&slopes) {
-            self.queues.column_changed(j, self.a.column(j).len());
+            self.column_changed(j);
         }
         self.alive[column] = false;
         for (i, entries, domain) in updates {
@@ -581,6 +810,17 @@ impl Model {
         self.replace_row_bounds(row, bounds);
     }
 
+    /// Restrict a row to one of its finite sides. The caller has a direction
+    /// that moves any feasible point onto that side without leaving the
+    /// feasible set or increasing the objective, so the reduced equality's
+    /// multiplier already has the side's sign and no record is needed.
+    pub fn restrict_row(&mut self, row: usize, side: Side) {
+        let RowDomain::Linear(bounds) = self.rows[row] else {
+            unreachable!()
+        };
+        self.replace_row_bounds(row, Bounds::fixed(side.value(bounds)));
+    }
+
     pub fn aggregate(&mut self, keep: usize, removed: usize, ratio: f64, tolerance: f64) -> bool {
         if !ratio.is_finite()
             || ratio == 0.0
@@ -625,6 +865,50 @@ impl Model {
         true
     }
 
+    /// Minimize a free column that no row contains out of the objective. The
+    /// stationarity condition `p_jj x_j + Σ p_jk x_k + c_j = 0` is an affine
+    /// substitution, so the Hessian update is the same Schur complement the
+    /// equality substitutions apply, under the same fill limit. Net Hessian
+    /// growth is never allowed here: a chain of such eliminations is a dense
+    /// factorization, which is the solver's job.
+    pub fn eliminate_coupled(&mut self, column: usize, max_fill: usize) -> bool {
+        debug_assert!(self.a.column(column).is_empty() && self.bounds[column] == Bounds::FREE);
+        let diagonal = self.objective.p.get(column, column);
+        if !diagonal.is_finite() || diagonal <= 0.0 {
+            return false;
+        }
+        let offset = -self.objective.c[column] / diagonal;
+        let slopes: Entries = self
+            .objective
+            .p
+            .row(column)
+            .iter()
+            .filter(|&&(k, _)| k != column)
+            .map(|&(k, p)| (k, -p / diagonal))
+            .collect();
+        if !offset.is_finite() || slopes.iter().any(|&(_, s)| !s.is_finite()) {
+            return false;
+        }
+        if self
+            .objective
+            .try_substitute(column, offset, &slopes, max_fill, false, self.deadline)
+            .is_err()
+        {
+            return false;
+        }
+        for &(k, _) in &slopes {
+            self.column_changed(k);
+        }
+        self.alive[column] = false;
+        self.postsolve.rules.push(Rule::Eliminated {
+            column,
+            offset,
+            slopes,
+        });
+        self.revision += 1;
+        true
+    }
+
     /// Symbolic-infinity elimination, restricted to a flat quadratic
     /// direction. The rule supplies the unlocked direction proof.
     pub fn remove_unlocked(&mut self, column: usize) {
@@ -633,7 +917,10 @@ impl Model {
             .a
             .column(column)
             .iter()
-            .map(|(i, _)| {
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|i| {
                 self.equation(i)
                     .expect("a cone row locks both directions")
                     .as_ref()
@@ -642,7 +929,7 @@ impl Model {
             .collect();
         self.alive[column] = false;
         for equation in &rows {
-            self.replace_row(equation.row, &[], RowDomain::Deleted);
+            self.clear_row(equation.row);
         }
         self.postsolve.rules.push(Rule::Unlocked {
             column,
