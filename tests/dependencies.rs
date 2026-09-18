@@ -28,7 +28,7 @@ fn fixture(quadratic: bool, perturbation: f64, inconsistent: bool) -> Problem {
                 .into()
         }),
         c,
-        objective_constant: 2.,
+        c0: 2.,
         a: CscMatrix::from_triplets(
             3,
             6,
@@ -200,7 +200,7 @@ fn multirow_proofs_survive_prior_dependency_deletions() {
         c: (0..n)
             .map(|j| -1. + (0..m).map(|i| rows[i][j] * y[i]).sum::<f64>())
             .collect(),
-        objective_constant: 0.,
+        c0: 0.,
         a: CscMatrix::from_triplets(
             m,
             n,

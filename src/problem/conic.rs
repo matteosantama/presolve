@@ -185,18 +185,12 @@ impl Problem {
                 Output::Bound { .. } => false,
             });
         if identity {
-            let Problem {
-                p,
-                c,
-                objective_constant,
-                a,
-                ..
-            } = self;
+            let Problem { p, c, c0, a, .. } = self;
             return ConicExport {
                 problem: ConicData {
                     p: p.map(|p| p.into_csc()),
                     c,
-                    objective_constant,
+                    objective_constant: c0,
                     a: a.into_csc(),
                     b,
                     cones,
@@ -269,17 +263,12 @@ impl Problem {
                     .chain(bound)
             })
         };
-        let Problem {
-            p,
-            c,
-            objective_constant,
-            ..
-        } = self;
+        let Problem { p, c, c0, .. } = self;
         ConicExport {
             problem: ConicData {
                 p: p.map(|p| p.into_csc()),
                 c,
-                objective_constant,
+                objective_constant: c0,
                 a,
                 b,
                 cones,

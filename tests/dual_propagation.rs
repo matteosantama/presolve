@@ -22,7 +22,7 @@ fn tight_row() -> Problem {
     Problem {
         p: None,
         c: vec![-1., 0.],
-        objective_constant: 0.,
+        c0: 0.,
         a: CscMatrix::from_triplets(1, 2, vec![0, 0], vec![0, 1], vec![1., -1.])
             .unwrap()
             .into(),
@@ -48,7 +48,7 @@ fn fixed_column() -> Problem {
     Problem {
         p: None,
         c: vec![1., 0.5],
-        objective_constant: 0.,
+        c0: 0.,
         a: CscMatrix::from_triplets(1, 2, vec![0, 0], vec![0, 1], vec![1., 1.])
             .unwrap()
             .into(),
@@ -138,7 +138,7 @@ fn dual_infeasible_systems_produce_no_reductions() {
     let problem = Problem {
         p: None,
         c: vec![-1., -1.],
-        objective_constant: 0.,
+        c0: 0.,
         a: CscMatrix::from_triplets(1, 2, vec![0, 0], vec![0, 1], vec![1., -1.])
             .unwrap()
             .into(),

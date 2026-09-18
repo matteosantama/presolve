@@ -26,7 +26,7 @@ fn problem(x: Bounds, y: Bounds) -> Problem {
     Problem {
         p: None,
         c: vec![1., 2., 0.],
-        objective_constant: 0.,
+        c0: 0.,
         a: CscMatrix::from_triplets(2, 3, vec![0, 0, 1, 1], vec![0, 1, 1, 2], vec![1.; 4])
             .unwrap()
             .into(),
@@ -106,7 +106,7 @@ fn dominating_column_is_fixed_at_its_upper_bound_when_the_other_is_free_below() 
             upper: f64::INFINITY
         })
     );
-    assert_eq!(r.problem.objective_constant, 3.);
+    assert_eq!(r.problem.c0, 3.);
 }
 
 #[test]
@@ -139,7 +139,7 @@ fn identical_support_pairs_are_found_inside_the_parallel_column_scan() {
     let problem = Problem {
         p: None,
         c: vec![1., 2., 0.],
-        objective_constant: 0.,
+        c0: 0.,
         a: CscMatrix::from_triplets(
             2,
             3,

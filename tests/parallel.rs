@@ -34,7 +34,7 @@ fn problem(blocks: usize, quadratic: bool) -> Problem {
     Problem {
         p: quadratic.then(|| CscMatrix::from_triplets(n, n, pi, pj, pv).unwrap().into()),
         c: vec![-2.; n],
-        objective_constant: 2. * blocks as f64,
+        c0: 2. * blocks as f64,
         a: CscMatrix::from_triplets(2 * blocks, n, ai, aj, av)
             .unwrap()
             .into(),
@@ -110,7 +110,7 @@ fn same_result(a: PresolveResult, b: PresolveResult, input: &Problem) {
                 b.p.as_ref().and_then(|p| p.as_csc())
             );
             assert_eq!(a.c, b.c);
-            assert_eq!(a.objective_constant, b.objective_constant);
+            assert_eq!(a.c0, b.c0);
             assert_eq!(a.rows, b.rows);
             assert_eq!(a.variable_bounds, b.variable_bounds);
             assert_eq!(a.cones, b.cones);
@@ -294,7 +294,7 @@ fn collided_rows(classes: usize, width: usize, factor: f64) -> Problem {
     Problem {
         p: None,
         c: vec![0.; width],
-        objective_constant: 0.,
+        c0: 0.,
         a: CscMatrix::from_triplets(m, width, ai, aj, av)
             .unwrap()
             .into(),
@@ -378,7 +378,7 @@ fn redundant_parallel_row_keeps_warm_start_stationarity_without_tightening() {
         let input = Problem {
             p: None,
             c: vec![2.; 2],
-            objective_constant: 0.,
+            c0: 0.,
             a: CscMatrix::from_triplets(
                 2,
                 2,

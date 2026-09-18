@@ -16,7 +16,7 @@ fn problem() -> Problem {
                 .into(),
         ),
         c: vec![1., 0.],
-        objective_constant: 0.,
+        c0: 0.,
         a: CscMatrix::from_triplets(1, 2, vec![0], vec![1], vec![1.])
             .unwrap()
             .into(),
@@ -50,7 +50,7 @@ fn coupled_free_column_is_minimized_out_of_the_objective() {
     };
     assert_eq!(r.problem.variable_count(), 1);
     assert_eq!(r.problem.c, [-1.]);
-    assert_eq!(r.problem.objective_constant, -0.5);
+    assert_eq!(r.problem.c0, -0.5);
     let p = r.problem.p.as_ref().unwrap();
     assert_eq!(p.column(0).collect::<Vec<_>>(), [(0, 2.)]);
     // Reduced optimum y = 1 with multiplier 1 on the row.

@@ -195,7 +195,7 @@ fn parse(text: &str) -> Result<Problem> {
     Ok(Problem {
         p,
         c,
-        objective_constant,
+        c0: objective_constant,
         a: CscMatrix::from_triplets(rows.len(), n, ai, aj, av)?.into(),
         rows: bounds.into_iter().map(Constraint::Linear).collect(),
         variable_bounds,

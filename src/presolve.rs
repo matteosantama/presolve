@@ -149,7 +149,7 @@ fn working_model(problem: &mut Problem, settings: &Settings, start: Instant) -> 
         rows,
         bounds,
     );
-    model.objective.constant = problem.objective_constant;
+    model.objective.constant = problem.c0;
     model.configure(settings, start.checked_add(settings.time_limit));
     model.set_cones(problem.cones.clone());
     model
@@ -388,7 +388,7 @@ fn compact_problem(
     Problem {
         p,
         c,
-        objective_constant: model.objective.constant,
+        c0: model.objective.constant,
         variable_bounds: bounds,
         rows: domains,
         cones,
@@ -441,7 +441,7 @@ mod tests {
         let mut original = Problem {
             p: Some(p.into()),
             c: vec![0.; 2],
-            objective_constant: 0.,
+            c0: 0.,
             a: CscMatrix::from_parts(1, 2, vec![0, 1, 2], vec![0, 0], vec![1., 1.]).into(),
             rows: vec![Constraint::Linear(Bounds {
                 lower: f64::NEG_INFINITY,
@@ -469,6 +469,6 @@ mod tests {
         assert!(p.as_csc().is_none());
         assert_eq!(p.column(0).collect::<Vec<_>>(), [(0, 3.)]);
         assert_eq!(p.column(1).count(), 0);
-        assert_eq!(r.problem.objective_constant, 1.);
+        assert_eq!(r.problem.c0, 1.);
     }
 }

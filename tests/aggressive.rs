@@ -39,7 +39,7 @@ fn equation(n: usize, bounded: bool) -> Problem {
         ),
         // x = 1, y = 1/4, z = 0 satisfies stationarity and feasibility.
         c: vec![-0.75; n],
-        objective_constant: 3.,
+        c0: 3.,
         a: CscMatrix::from_triplets(1, n, vec![0; n], (0..n).collect(), vec![1.; n])
             .unwrap()
             .into(),
@@ -67,7 +67,7 @@ fn column(a: &CscMatrix, j: usize) -> impl Iterator<Item = (usize, f64)> + '_ {
 fn check_kkt(p: &Problem, s: &Solution) -> f64 {
     let n = p.c.len();
     let mut gradient = p.c.clone();
-    let mut value = p.objective_constant + p.c.iter().zip(&s.x).map(|(c, x)| c * x).sum::<f64>();
+    let mut value = p.c0 + p.c.iter().zip(&s.x).map(|(c, x)| c * x).sum::<f64>();
     if let Some(h) = &p.p {
         for j in 0..n {
             for (i, a) in column(h.as_csc().unwrap(), j) {
@@ -354,7 +354,7 @@ fn alternative_pivots_recover_after_a_fill_rejection() {
     let input = Problem {
         p: None,
         c: vec![0.; 4],
-        objective_constant: 0.,
+        c0: 0.,
         a: CscMatrix::from_triplets(
             3,
             4,
@@ -491,7 +491,7 @@ fn pivot_policies_preserve_known_quadratic_optima() {
                     .into(),
             ),
             c,
-            objective_constant: 3.,
+            c0: 3.,
             a: CscMatrix::from_triplets(
                 m,
                 n,
@@ -547,7 +547,7 @@ fn propagation_gain_controls_are_independent_and_preserve_dual_recovery() {
         let input = Problem {
             p: None,
             c: vec![-1., 0.],
-            objective_constant: 0.,
+            c0: 0.,
             a: CscMatrix::from_triplets(1, 2, vec![0, 0], vec![0, 1], vec![1., 1.])
                 .unwrap()
                 .into(),

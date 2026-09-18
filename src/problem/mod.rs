@@ -40,7 +40,7 @@ pub enum Constraint {
 pub struct Problem {
     pub p: Option<QuadraticMatrix>,
     pub c: Vec<f64>,
-    pub objective_constant: f64,
+    pub c0: f64,
     pub a: ConstraintMatrix,
     pub rows: Vec<Constraint>,
     pub variable_bounds: Vec<Bounds>,
@@ -258,7 +258,7 @@ impl Problem {
                 |p| p.0.working(),
             ),
             c: std::mem::take(&mut self.c),
-            constant: self.objective_constant,
+            constant: self.c0,
             scratch: Default::default(),
         }
     }
