@@ -185,7 +185,7 @@ impl Model {
         proof: impl FnOnce(&mut Self) -> Arc<Equation>,
         propagation: bool,
     ) -> Result<bool, Certificate> {
-        if !value.is_finite() || (propagation && value.abs() >= self.numerics.huge_bound) {
+        if !value.is_finite() || (propagation && value.abs() >= self.settings.numerics.huge_bound) {
             return Ok(false);
         }
         let old = self.bounds[j];
@@ -217,8 +217,9 @@ impl Model {
                 Side::Upper => old.upper - value,
             };
             if gain
-                <= (self.propagation.minimum_gain_factor * self.numerics.feasibility)
-                    .max(self.propagation.minimum_relative_gain * side.value(old).abs())
+                <= (self.settings.propagation.minimum_gain_factor
+                    * self.settings.numerics.feasibility)
+                    .max(self.settings.propagation.minimum_relative_gain * side.value(old).abs())
             {
                 return Ok(false);
             }
@@ -233,6 +234,6 @@ impl Model {
     }
 
     pub(super) fn separated(&self, lower: f64, upper: f64) -> bool {
-        lower > upper + self.numerics.feasibility * (1.0 + lower.abs().max(upper.abs()))
+        lower > upper + self.settings.numerics.feasibility * (1.0 + lower.abs().max(upper.abs()))
     }
 }

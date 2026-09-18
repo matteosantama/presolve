@@ -17,7 +17,7 @@ impl Model {
         }
     }
 
-    pub fn empty_columns(&mut self, max_fill: usize) -> Result<(), Certificate> {
+    pub fn empty_columns(&mut self) -> Result<(), Certificate> {
         while let Some(j) = self.queues.empty_columns.pop() {
             if !self.alive[j] || !self.a.column(j).is_empty() {
                 continue;
@@ -27,11 +27,11 @@ impl Model {
                 // form; a bounded one would need a clipped, nonaffine rule.
                 // A rejected elimination is retried only after the Hessian
                 // changed, since the column's fill is a function of `P` alone.
-                if self.rules.quadratic_elimination
+                if self.settings.rules.quadratic_elimination
                     && self.bounds[j] == Bounds::FREE
                     && self.objective.p.row(j).len() <= MAX_ELIMINATION_DEGREE
                     && self.elimination_rejected[j] != self.objective.p.revision + 1
-                    && !self.eliminate_coupled(j, max_fill)
+                    && !self.eliminate_coupled(j, self.settings.substitution_fill)
                 {
                     self.elimination_rejected[j] = self.objective.p.revision + 1;
                 }

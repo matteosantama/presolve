@@ -6,20 +6,9 @@
 use crate::{
     core::{execution::Executor, model::Model},
     postsolve::tape::Certificate,
-    settings::{Progress, PropagationSettings, SparsificationSettings},
+    settings::Progress,
 };
 use std::time::{Duration, Instant};
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Limits {
-    pub time: Duration,
-    /// Maximum newly introduced coefficients in A and P per substitution.
-    pub fill: usize,
-    pub sparsify: bool,
-    pub progress: Progress,
-    pub propagation: PropagationSettings,
-    pub sparsification: SparsificationSettings,
-}
 
 #[derive(Debug, Default)]
 pub(crate) struct Stats {
@@ -35,25 +24,25 @@ impl Model {
     fn cleanup(&mut self) -> Result<(), Certificate> {
         loop {
             let before = self.revision;
-            if self.rules.fixed_variables {
+            if self.settings.rules.fixed_variables {
                 self.fixed_variables();
             }
-            if self.rules.cones && !self.cones.is_empty() {
+            if self.settings.rules.cones && !self.cones.is_empty() {
                 self.simplify_cones()?;
             }
-            if self.rules.empty_columns {
-                self.empty_columns(self.fill)?;
+            if self.settings.rules.empty_columns {
+                self.empty_columns()?;
             }
-            if self.rules.dual_fixing {
+            if self.settings.rules.dual_fixing {
                 self.simple_dual_fix()?;
             }
-            if self.rules.singleton_rows {
+            if self.settings.rules.singleton_rows {
                 self.singleton_rows()?;
             }
-            if self.rules.empty_rows {
+            if self.settings.rules.empty_rows {
                 self.empty_rows()?;
             }
-            if self.rules.cones && !self.cones.is_empty() {
+            if self.settings.rules.cones && !self.cones.is_empty() {
                 self.simplify_cones()?;
             }
             if self.revision == before {
@@ -63,9 +52,9 @@ impl Model {
         Ok(())
     }
 
-    pub fn run(&mut self, limits: Limits, executor: &Executor) -> Result<Stats, Certificate> {
-        self.fill = limits.fill;
-        let result = self.run_phases(limits, executor);
+    /// Run every phase within `time`, the remaining part of the budget.
+    pub fn run(&mut self, time: Duration, executor: &Executor) -> Result<Stats, Certificate> {
+        let result = self.run_phases(time, executor);
         result.map_err(|mut certificate| {
             // The tape uses stable model indices, including when a
             // certificate ends exploration before final matrix packing.
@@ -75,14 +64,14 @@ impl Model {
         })
     }
 
-    fn run_phases(&mut self, limits: Limits, executor: &Executor) -> Result<Stats, Certificate> {
+    fn run_phases(&mut self, time: Duration, executor: &Executor) -> Result<Stats, Certificate> {
         let start = Instant::now();
         let mut stats = Stats::default();
         let mut fast = true;
         let mut cycle_size = self.work_size();
         let mut cycle_revision = self.revision;
         loop {
-            if start.elapsed() >= limits.time {
+            if start.elapsed() >= time {
                 stats.time_limit = true;
                 break;
             }
@@ -91,51 +80,53 @@ impl Model {
             let before_revision = self.revision;
             if fast {
                 stats.fast_phases += 1;
-                if self.rules.singleton_columns {
-                    self.singleton_columns(limits.fill);
+                if self.settings.rules.singleton_columns {
+                    self.singleton_columns();
                 }
                 self.cleanup()?;
-                if self.rules.doubleton_equalities {
-                    self.doubleton_equalities(limits.fill);
+                if self.settings.rules.doubleton_equalities {
+                    self.doubleton_equalities();
                 }
-                if self.rules.short_equalities {
-                    self.short_equalities(limits.fill, start + limits.time);
+                if self.settings.rules.short_equalities {
+                    self.short_equalities(start + time);
                 }
                 self.cleanup()?;
                 // Repeat fast phases under the selected progress policy,
                 // then try the more expensive medium rules.
                 fast = significant_progress(
-                    limits.progress,
+                    self.settings.progress,
                     before,
                     self.work_size(),
                     before_revision != self.revision,
                 );
             } else {
                 stats.medium_phases += 1;
-                if self.rules.bound_propagation {
-                    self.propagate_rounds(limits, start + limits.time)?;
+                if self.settings.rules.bound_propagation {
+                    self.propagate_rounds(start + time)?;
                 }
-                if self.rules.dual_fixing {
+                if self.settings.rules.dual_fixing {
                     self.coupled_dual_fix();
                 }
                 self.cleanup()?;
-                if self.rules.short_equalities {
-                    self.short_equalities(limits.fill, start + limits.time);
+                if self.settings.rules.short_equalities {
+                    self.short_equalities(start + time);
                 }
                 self.cleanup()?;
-                if self.rules.parallel_rows {
+                if self.settings.rules.parallel_rows {
                     stats.parallel_comparisons += self.parallel_rows(executor)?;
                 }
-                if self.rules.parallel_columns {
+                if self.settings.rules.parallel_columns {
                     stats.parallel_comparisons += self.parallel_columns(executor)?;
                 }
-                if self.rules.dominated_columns && self.dominated_columns.general_search {
+                if self.settings.rules.dominated_columns
+                    && self.settings.dominated_columns.general_search
+                {
                     self.dominated_columns()?;
                 }
                 self.cleanup()?;
                 let after = self.work_size();
                 if !significant_progress(
-                    limits.progress,
+                    self.settings.progress,
                     cycle_size,
                     after,
                     cycle_revision != self.revision,
@@ -144,7 +135,7 @@ impl Model {
                 }
                 cycle_size = after;
                 cycle_revision = self.revision;
-                if matches!(limits.progress, Progress::AnyChange) {
+                if matches!(self.settings.progress, Progress::AnyChange) {
                     // A pivot's degree or curvature can change without editing
                     // this equality itself. Revisit those candidates next cycle.
                     for (i, row) in self.rows.iter().enumerate() {
@@ -160,34 +151,34 @@ impl Model {
                 fast = true;
             }
         }
-        if !stats.time_limit && self.rules.equality_dependencies {
-            let deadline = start + limits.time;
+        if !stats.time_limit && self.settings.rules.equality_dependencies {
+            let deadline = start + time;
             if self.equality_dependencies(deadline)? > 0 {
-                self.sparsify_cleanup(limits, deadline)?;
+                self.sparsify_cleanup(deadline)?;
             }
             stats.time_limit = Instant::now() >= deadline;
         }
-        if !stats.time_limit && limits.sparsify {
-            let deadline = start + limits.time;
-            if self.sparsify_rows(deadline, limits.sparsification) > 0 {
-                self.sparsify_cleanup(limits, deadline)?;
+        if !stats.time_limit && self.settings.rules.sparsification {
+            let deadline = start + time;
+            if self.sparsify_rows(deadline) > 0 {
+                self.sparsify_cleanup(deadline)?;
             }
             stats.time_limit = Instant::now() >= deadline;
         }
-        if !stats.time_limit && self.rules.redundant_bounds {
+        if !stats.time_limit && self.settings.rules.redundant_bounds {
             self.remove_redundant_bounds();
         }
         // Dual propagation runs once, on the final model: implied-free columns
         // are exposed only now, and one pass here finds what repeated passes
         // in the medium phases would, without their per-phase sweeps.
-        if !stats.time_limit && self.rules.dual_propagation {
-            let deadline = start + limits.time;
+        if !stats.time_limit && self.settings.rules.dual_propagation {
+            let deadline = start + time;
             if self.dual_propagation()? > 0 {
                 // Drain the direct consequences only: new equalities feed the
                 // substitution rules and fixed columns feed cleanup. A further
                 // propagation round or bound sweep would cost more than the
                 // few extra reductions it finds here.
-                self.substitution_cleanup(limits, deadline)?;
+                self.substitution_cleanup(deadline)?;
             }
             stats.time_limit = Instant::now() >= deadline;
         }
@@ -197,13 +188,14 @@ impl Model {
     /// Bounds can expose rules without immediately shrinking the matrix.
     /// Extra rounds share a configurable work allowance and do not repeat
     /// global parallel scans.
-    fn propagate_rounds(&mut self, limits: Limits, deadline: Instant) -> Result<(), Certificate> {
+    fn propagate_rounds(&mut self, deadline: Instant) -> Result<(), Certificate> {
         let mut tightened = self.propagate_bounds()?;
-        let mut work = limits
+        let mut work = self
+            .settings
             .propagation
             .work_limit
             .resolve((self.a.nnz() / 4).max(256));
-        for _ in 0..limits.propagation.additional_rounds {
+        for _ in 0..self.settings.propagation.additional_rounds {
             if tightened == 0 || Instant::now() >= deadline {
                 break;
             }
@@ -221,14 +213,14 @@ impl Model {
             }
             work -= cost;
             self.cleanup()?;
-            if self.rules.singleton_columns {
-                self.singleton_columns(limits.fill);
+            if self.settings.rules.singleton_columns {
+                self.singleton_columns();
             }
-            if self.rules.doubleton_equalities {
-                self.doubleton_equalities(limits.fill);
+            if self.settings.rules.doubleton_equalities {
+                self.doubleton_equalities();
             }
-            if self.rules.short_equalities {
-                self.short_equalities(limits.fill, deadline);
+            if self.settings.rules.short_equalities {
+                self.short_equalities(deadline);
             }
             self.cleanup()?;
             tightened = self.propagate_bounds()?;
@@ -238,21 +230,21 @@ impl Model {
 
     // Drain consequences even for size changes below the ordinary 5% cycle
     // threshold. Existing substitution limits still account for A and P fill.
-    fn sparsify_cleanup(&mut self, limits: Limits, deadline: Instant) -> Result<(), Certificate> {
+    fn sparsify_cleanup(&mut self, deadline: Instant) -> Result<(), Certificate> {
         while Instant::now() < deadline {
             let before = self.revision;
             self.cleanup()?;
-            if self.rules.bound_propagation {
+            if self.settings.rules.bound_propagation {
                 self.propagate_bounds()?;
             }
-            if self.rules.singleton_columns {
-                self.singleton_columns(limits.fill);
+            if self.settings.rules.singleton_columns {
+                self.singleton_columns();
             }
-            if self.rules.doubleton_equalities {
-                self.doubleton_equalities(limits.fill);
+            if self.settings.rules.doubleton_equalities {
+                self.doubleton_equalities();
             }
-            if self.rules.short_equalities {
-                self.short_equalities(limits.fill, deadline);
+            if self.settings.rules.short_equalities {
+                self.short_equalities(deadline);
             }
             self.cleanup()?;
             if self.revision == before {
@@ -263,22 +255,18 @@ impl Model {
     }
 
     /// Cleanup and substitution only, without propagation rounds.
-    fn substitution_cleanup(
-        &mut self,
-        limits: Limits,
-        deadline: Instant,
-    ) -> Result<(), Certificate> {
+    fn substitution_cleanup(&mut self, deadline: Instant) -> Result<(), Certificate> {
         while Instant::now() < deadline {
             let before = self.revision;
             self.cleanup()?;
-            if self.rules.singleton_columns {
-                self.singleton_columns(limits.fill);
+            if self.settings.rules.singleton_columns {
+                self.singleton_columns();
             }
-            if self.rules.doubleton_equalities {
-                self.doubleton_equalities(limits.fill);
+            if self.settings.rules.doubleton_equalities {
+                self.doubleton_equalities();
             }
-            if self.rules.short_equalities {
-                self.short_equalities(limits.fill, deadline);
+            if self.settings.rules.short_equalities {
+                self.short_equalities(deadline);
             }
             self.cleanup()?;
             if self.revision == before {

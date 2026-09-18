@@ -269,6 +269,24 @@ pub struct PropagationSettings {
     /// Default allowance: max(A nonzeros / 4, 256) across the extra rounds.
     pub work_limit: WorkLimit,
 }
+impl PropagationSettings {
+    /// Replace invalid gain thresholds by their documented defaults.
+    pub(crate) fn sanitized(self) -> Self {
+        let valid = |value: f64, default| {
+            if value.is_finite() && value >= 0.0 {
+                value
+            } else {
+                default
+            }
+        };
+        Self {
+            minimum_relative_gain: valid(self.minimum_relative_gain, 0.01),
+            minimum_gain_factor: valid(self.minimum_gain_factor, 1e4),
+            ..self
+        }
+    }
+}
+
 impl Default for PropagationSettings {
     fn default() -> Self {
         Self {

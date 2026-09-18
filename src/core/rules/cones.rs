@@ -68,7 +68,7 @@ impl Model {
             // constant block's current coordinates, recovered by the tape.
             if rows.iter().all(|&i| self.a.row(i).is_empty()) {
                 let rhs: Vec<_> = rows.iter().map(|&i| self.cone_rhs(i)).collect();
-                match cone.classify(&rhs, self.numerics.feasibility) {
+                match cone.classify(&rhs, self.settings.numerics.feasibility) {
                     crate::problem::Membership::Inside => {
                         for i in rows {
                             self.remove_cone_row(i);
@@ -91,7 +91,7 @@ impl Model {
                 Cone::SecondOrder(_) => {
                     let head = rows[0];
                     if self.a.row(head).is_empty()
-                        && self.cone_rhs(head) < -self.numerics.feasibility
+                        && self.cone_rhs(head) < -self.settings.numerics.feasibility
                     {
                         return Err(self.primal_certificate([(head, -1.)], []));
                     }

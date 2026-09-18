@@ -227,9 +227,11 @@ impl Model {
 
     /// Authoritative comparison and mutation, shared by both discovery paths.
     fn merge_parallel_rows(&mut self, base: usize, other: usize) -> Result<bool, Certificate> {
-        let Some((ratio, exact)) =
-            proportional(self.a.row(base), self.a.row(other), self.numerics.parallel)
-        else {
+        let Some((ratio, exact)) = proportional(
+            self.a.row(base),
+            self.a.row(other),
+            self.settings.numerics.parallel,
+        ) else {
             return Ok(false);
         };
         let RowDomain::Linear(b) = self.rows[base] else {
@@ -256,7 +258,7 @@ impl Model {
             let gap = intersection.lower - intersection.upper;
             if !exact
                 || gap
-                    <= self.numerics.feasibility
+                    <= self.settings.numerics.feasibility
                         * (1.0 + intersection.lower.abs().max(intersection.upper.abs()))
             {
                 return Ok(false);
@@ -310,9 +312,11 @@ impl Model {
                         continue;
                     }
                     comparisons += 1;
-                    let Some((ratio, exact)) =
-                        proportional(self.a.column(k), self.a.column(j), self.numerics.parallel)
-                    else {
+                    let Some((ratio, exact)) = proportional(
+                        self.a.column(k),
+                        self.a.column(j),
+                        self.settings.numerics.parallel,
+                    ) else {
                         continue;
                     };
                     // An approximate null direction can have quadratic cost
@@ -351,7 +355,7 @@ impl Model {
                 }
             }
         }
-        if self.rules.dominated_columns {
+        if self.settings.rules.dominated_columns {
             comparisons += self.dominated_support_groups(&entries)?;
         }
         Ok(comparisons)

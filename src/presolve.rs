@@ -3,7 +3,6 @@ use crate::{
     core::{
         execution::Executor,
         model::{Model, RowDomain},
-        schedule::Limits,
     },
     matrix::quadratic::Quadratic,
     postsolve::{
@@ -94,26 +93,7 @@ fn presolve_owned(
         },
     );
     model.objective.constant = problem.objective_constant;
-    model.rules = settings.rules;
-    model.numerics = settings.numerics;
-    model.propagation = settings.propagation;
-    let valid_gain = |value: f64, default| {
-        if value.is_finite() && value >= 0.0 {
-            value
-        } else {
-            default
-        }
-    };
-    model.propagation.minimum_relative_gain =
-        valid_gain(settings.propagation.minimum_relative_gain, 0.01);
-    model.propagation.minimum_gain_factor =
-        valid_gain(settings.propagation.minimum_gain_factor, 1e4);
-    model.dual_propagation = settings.dual_propagation;
-    model.dominated_columns = settings.dominated_columns;
-    model.equalities = settings.equalities;
-    model.dependencies = settings.dependencies;
-    model.allow_hessian_growth = settings.allow_hessian_growth;
-    model.deadline = start.checked_add(settings.time_limit);
+    model.configure(settings, start.checked_add(settings.time_limit));
     model.set_cones(problem.cones.clone());
     let before = size(&model);
     let mut stats = Stats {
@@ -126,14 +106,7 @@ fn presolve_owned(
         quadratic_changed: false,
     };
     let phases = model.run(
-        Limits {
-            time: settings.time_limit.saturating_sub(start.elapsed()),
-            fill: settings.substitution_fill,
-            sparsify: settings.rules.sparsification,
-            progress: settings.progress,
-            propagation: settings.propagation,
-            sparsification: settings.sparsification,
-        },
+        settings.time_limit.saturating_sub(start.elapsed()),
         executor,
     );
     stats.equalities = model.equality_stats;

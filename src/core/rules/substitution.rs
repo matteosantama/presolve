@@ -11,8 +11,9 @@ use std::time::Instant;
 
 impl Model {
     /// Equality substitution with bounded stable alternatives and sparse-work scoring.
-    pub fn short_equalities(&mut self, max_fill: usize, deadline: Instant) {
-        let options = self.equalities;
+    pub fn short_equalities(&mut self, deadline: Instant) {
+        let max_fill = self.settings.substitution_fill;
+        let options = self.settings.equalities;
         let relative = if options.relative_pivot > 0.0 && options.relative_pivot <= 1.0 {
             options.relative_pivot
         } else {
@@ -177,7 +178,8 @@ impl Model {
         }
     }
 
-    pub fn singleton_columns(&mut self, max_fill: usize) {
+    pub fn singleton_columns(&mut self) {
+        let max_fill = self.settings.substitution_fill;
         // A neighbour's bound may make this column implied free without
         // changing its own degree. Inspect each affected row once per round.
         for i in self.queues.changed_activities.take_singleton_round() {
@@ -262,7 +264,8 @@ impl Model {
         }
     }
 
-    pub fn doubleton_equalities(&mut self, max_fill: usize) {
+    pub fn doubleton_equalities(&mut self) {
+        let max_fill = self.settings.substitution_fill;
         for i in self.queues.doubleton_rows.take_round() {
             if self.deadline.is_some_and(|d| Instant::now() >= d) {
                 break;

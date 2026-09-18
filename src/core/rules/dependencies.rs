@@ -68,7 +68,7 @@ fn subtract(target: &Entries, base: &Entries, alpha: f64, out: &mut Entries) -> 
 
 impl Model {
     pub fn equality_dependencies(&mut self, deadline: Instant) -> Result<usize, Certificate> {
-        let options = self.dependencies;
+        let options = self.settings.dependencies;
         let mut work = options.work_limit.resolve(self.a.nnz().saturating_mul(4));
         if work == 0 || options.max_basis_rows == 0 || options.max_row_length == 0 {
             return Ok(0);
@@ -170,7 +170,7 @@ impl Model {
                             (a * b.lower).abs()
                         })
                         .sum();
-                    if rhs.abs() > self.numerics.feasibility * (1.0 + scale) {
+                    if rhs.abs() > self.settings.numerics.feasibility * (1.0 + scale) {
                         return Err(self.primal_certificate(
                             proof.iter().map(|&(j, a)| (j, rhs.signum() * a)),
                             [],

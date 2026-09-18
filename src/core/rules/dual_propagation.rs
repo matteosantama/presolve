@@ -140,6 +140,7 @@ impl Model {
         scratch.proofs.clear();
         scratch.proofs.resize(2 * m, Vec::new());
         let budget = self
+            .settings
             .dual_propagation
             .work_limit
             .resolve(self.a.nnz().saturating_mul(4));
@@ -521,8 +522,9 @@ impl Model {
         }
         if old.is_finite()
             && gain
-                <= (self.propagation.minimum_gain_factor * self.numerics.feasibility)
-                    .max(self.propagation.minimum_relative_gain * old.abs())
+                <= (self.settings.propagation.minimum_gain_factor
+                    * self.settings.numerics.feasibility)
+                    .max(self.settings.propagation.minimum_relative_gain * old.abs())
         {
             return Some(false);
         }

@@ -214,6 +214,7 @@ impl Model {
         scratch.open.clear();
         scratch.open.resize(n, 0);
         let work = self
+            .settings
             .dominated_columns
             .work_limit
             .resolve(self.a.nnz().saturating_mul(2));

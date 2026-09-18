@@ -5,7 +5,6 @@ use crate::{
     matrix::sparse::Entries,
     postsolve::tape::Rule,
     problem::Bounds,
-    settings::SparsificationSettings,
 };
 use std::time::Instant;
 
@@ -77,7 +76,8 @@ fn subtract<I: Iterator<Item = (usize, f64)> + Clone>(
 }
 
 impl Model {
-    pub fn sparsify_rows(&mut self, deadline: Instant, options: SparsificationSettings) -> usize {
+    pub fn sparsify_rows(&mut self, deadline: Instant) -> usize {
+        let options = self.settings.sparsification;
         let m = self.rows.len();
         // One record per row keeps the three scan fields on the same cache
         // line; the scan touches them together for every column entry.

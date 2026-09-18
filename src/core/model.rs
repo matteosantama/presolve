@@ -48,20 +48,12 @@ pub(crate) struct Model {
     /// unchanged row then reuse one copy instead of taking one per round.
     equations: Vec<Option<Arc<Equation>>>,
     pub revision: usize,
-    pub rules: crate::settings::Rules,
-    pub numerics: crate::settings::Numerics,
-    pub propagation: crate::settings::PropagationSettings,
-    pub dual_propagation: crate::settings::DualPropagationSettings,
-    pub dominated_columns: crate::settings::DominatedColumnSettings,
+    /// Run configuration, applied once by `configure`.
+    pub settings: crate::settings::Settings,
     pub dual_scratch: super::rules::dual_propagation::DualScratch,
     pub dominated_scratch: super::rules::dominated_columns::DominatedScratch,
-    pub equalities: crate::settings::EqualitySettings,
-    pub dependencies: crate::settings::DependencySettings,
     pub equality_stats: crate::result::EqualityStats,
     pub substitution_failure: super::objective::SubstitutionFailure,
-    pub allow_hessian_growth: bool,
-    /// Fill allowance per substitution, shared with the cleanup rules.
-    pub fill: usize,
     /// Hessian revision plus one at which a coupled column's elimination was
     /// last rejected, so cleanup does not retry it on every visit.
     pub elimination_rejected: Vec<usize>,
@@ -166,19 +158,11 @@ impl Model {
             row_kinds: vec![row_kind::OTHER; m],
             equations: vec![None; m],
             revision: 0,
-            rules: crate::settings::Rules::default(),
-            numerics: crate::settings::Numerics::default(),
-            propagation: crate::settings::PropagationSettings::default(),
-            dual_propagation: crate::settings::DualPropagationSettings::default(),
-            dominated_columns: crate::settings::DominatedColumnSettings::default(),
+            settings: crate::settings::Settings::default(),
             dual_scratch: Default::default(),
             dominated_scratch: Default::default(),
-            equalities: crate::settings::EqualitySettings::default(),
-            dependencies: crate::settings::DependencySettings::default(),
             equality_stats: crate::result::EqualityStats::default(),
             substitution_failure: super::objective::SubstitutionFailure::Numerical,
-            allow_hessian_growth: false,
-            fill: usize::MAX,
             elimination_rejected: vec![0; n],
             deadline: None,
             cones: vec![],
@@ -211,6 +195,13 @@ impl Model {
                     .column(j)
                     .iter()
                     .all(|(i, _)| matches!(self.rows[i], RowDomain::Linear(_))))
+    }
+
+    /// Apply the caller's settings once; rules read them from `self.settings`.
+    pub fn configure(&mut self, settings: &crate::settings::Settings, deadline: Option<Instant>) {
+        self.settings = settings.clone();
+        self.settings.propagation = settings.propagation.sanitized();
+        self.deadline = deadline;
     }
 
     pub fn add_variable(&mut self, bounds: Bounds) -> usize {
@@ -420,7 +411,7 @@ impl Model {
         if bounds.equality() {
             self.queues.fixed_columns.push(column);
         }
-        let require_free = self.equalities.require_free_variable;
+        let require_free = self.settings.equalities.require_free_variable;
         for (i, a) in self.a.column(column) {
             shift_cached(&mut self.activities[i], a, old, bounds);
             self.queues.changed_activities.push(i);
@@ -701,7 +692,7 @@ impl Model {
             offset,
             &slopes,
             max_fill - fill,
-            self.allow_hessian_growth,
+            self.settings.allow_hessian_growth,
             self.deadline,
         ) {
             Ok(gradient) => gradient,
