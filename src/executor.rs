@@ -54,16 +54,21 @@ impl Executor {
     }
 }
 
-/// Order distinct values by a 64-bit key prefix with four counting passes,
-/// then finish each run of equal keys by comparison. Fingerprint keys are
-/// spread over the whole range, so this beats a comparison sort on models
-/// with many rows or columns. Each pass sweeps 65536 buckets, so inputs
-/// below the threshold use the library sort instead.
-const RADIX_THRESHOLD: usize = 32_768;
+/// Order distinct values by a 64-bit key prefix, then finish each run of
+/// equal keys by comparison. Fingerprint keys are usually spread over the
+/// high bits but not always: on ±1 matrices the coefficient word is nearly
+/// constant, and on problems with few distinct supports only the low word
+/// discriminates. An MSD radix with a constant-digit skip handles the first
+/// shape; the second falls back to four LSD passes, and already sorted or
+/// small inputs use the library sort.
+const COMPARISON_THRESHOLD: usize = 4096;
 fn sort_by_radix_key<T: Ord + Copy>(values: &mut Vec<T>, key: impl Fn(&T) -> u64) {
     let n = values.len();
-    if n < RADIX_THRESHOLD {
+    if n < COMPARISON_THRESHOLD {
         values.sort_unstable();
+        return;
+    }
+    if values.is_sorted() {
         return;
     }
     let mut keyed: Vec<(u64, u32)> = values
@@ -72,29 +77,19 @@ fn sort_by_radix_key<T: Ord + Copy>(values: &mut Vec<T>, key: impl Fn(&T) -> u64
         .map(|(at, value)| (key(value), at as u32))
         .collect();
     let mut scratch = vec![(0u64, 0u32); n];
-    for shift in (0..64).step_by(16) {
-        let digit = |k: u64| ((k >> shift) & 0xffff) as usize;
-        let mut starts = vec![0usize; 1 << 16];
-        for &(k, _) in &keyed {
-            starts[digit(k)] += 1;
+    let mut seen = vec![false; 1 << 16];
+    let mut distinct = 0;
+    for &(k, _) in &keyed {
+        let digit = ((k >> 32) & 0xffff) as usize;
+        if !seen[digit] {
+            seen[digit] = true;
+            distinct += 1;
         }
-        // Skip a pass whose digit is constant, which is common in the high
-        // half of a key built from a single 32-bit hash.
-        if starts.contains(&n) {
-            continue;
-        }
-        let mut total = 0;
-        for start in &mut starts {
-            let count = *start;
-            *start = total;
-            total += count;
-        }
-        for &entry in &keyed {
-            let slot = &mut starts[digit(entry.0)];
-            scratch[*slot] = entry;
-            *slot += 1;
-        }
-        std::mem::swap(&mut keyed, &mut scratch);
+    }
+    if distinct < n / 64 {
+        lsd_sort(&mut keyed, &mut scratch);
+    } else {
+        msd_sort(&mut keyed, &mut scratch, 0);
     }
     let mut sorted: Vec<T> = keyed.iter().map(|&(_, at)| values[at as usize]).collect();
     let mut start = 0;
@@ -107,6 +102,71 @@ fn sort_by_radix_key<T: Ord + Copy>(values: &mut Vec<T>, key: impl Fn(&T) -> u64
         start = end;
     }
     *values = sorted;
+}
+
+/// Most-significant-digit radix sort by key. The digit width follows the
+/// slice length so buckets stay a few elements deep; a digit that is constant
+/// over the slice is consumed without a scatter.
+fn msd_sort(values: &mut [(u64, u32)], scratch: &mut [(u64, u32)], consumed: u32) {
+    let n = values.len();
+    if n <= 64 || consumed >= 64 {
+        values.sort_unstable();
+        return;
+    }
+    let bits = ((n / 4).ilog2()).clamp(4, 16).min(64 - consumed);
+    let shift = 64 - consumed - bits;
+    let mask = (1usize << bits) - 1;
+    let digit = |k: u64| ((k >> shift) as usize) & mask;
+    let mut starts = vec![0u32; (1 << bits) + 1];
+    for &(k, _) in values.iter() {
+        starts[digit(k) + 1] += 1;
+    }
+    if starts[1..].contains(&(n as u32)) {
+        return msd_sort(values, scratch, consumed + bits);
+    }
+    for b in 0..(1 << bits) {
+        starts[b + 1] += starts[b];
+    }
+    let mut next = starts.clone();
+    for &entry in values.iter() {
+        let slot = &mut next[digit(entry.0)];
+        scratch[*slot as usize] = entry;
+        *slot += 1;
+    }
+    values.copy_from_slice(&scratch[..n]);
+    for b in 0..(1 << bits) {
+        let (lo, hi) = (starts[b] as usize, starts[b + 1] as usize);
+        if hi - lo > 1 {
+            msd_sort(&mut values[lo..hi], &mut scratch[lo..hi], consumed + bits);
+        }
+    }
+}
+
+/// Four 16-bit counting passes from the low word up, skipping constant digits.
+fn lsd_sort(keyed: &mut Vec<(u64, u32)>, scratch: &mut Vec<(u64, u32)>) {
+    let n = keyed.len();
+    for shift in (0..64).step_by(16) {
+        let digit = |k: u64| ((k >> shift) & 0xffff) as usize;
+        let mut starts = vec![0usize; 1 << 16];
+        for &(k, _) in keyed.iter() {
+            starts[digit(k)] += 1;
+        }
+        if starts.contains(&n) {
+            continue;
+        }
+        let mut total = 0;
+        for start in &mut starts {
+            let count = *start;
+            *start = total;
+            total += count;
+        }
+        for &entry in keyed.iter() {
+            let slot = &mut starts[digit(entry.0)];
+            scratch[*slot] = entry;
+            *slot += 1;
+        }
+        std::mem::swap(keyed, scratch);
+    }
 }
 
 #[cfg(test)]
@@ -163,7 +223,7 @@ mod tests {
         type Candidate = ((u32, u32), Option<(u32, u32)>, usize);
         // Keys collide on the radix prefix; only the full value breaks ties.
         let mut random = 0x9e37_79b9_7f4a_7c15u64;
-        let values: Vec<Candidate> = (0..2 * RADIX_THRESHOLD)
+        let values: Vec<Candidate> = (0..16 * COMPARISON_THRESHOLD)
             .map(|i| {
                 random ^= random << 13;
                 random ^= random >> 7;
@@ -177,9 +237,7 @@ mod tests {
                 (hash, extra, i)
             })
             .collect();
-        let mut expected = values.clone();
-        expected.sort_unstable();
-        for count in [RADIX_THRESHOLD - 1, RADIX_THRESHOLD, values.len()] {
+        for count in [COMPARISON_THRESHOLD - 1, COMPARISON_THRESHOLD, values.len()] {
             let sorted = Executor::Serial.filter_map_sorted(
                 count,
                 false,
@@ -190,6 +248,34 @@ mod tests {
             reference.sort_unstable();
             assert_eq!(sorted, reference);
         }
-        assert_eq!(expected.len(), values.len());
+    }
+
+    #[test]
+    fn radix_sort_handles_sorted_skewed_and_spread_keys() {
+        let n = 50_000usize;
+        let mut random = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            random
+        };
+        // Already sorted keys, keys with few distinct high words (only the low
+        // word discriminates), keys with a near-constant low word, and spread
+        // keys, each with duplicates.
+        let sorted: Vec<(u64, usize)> = (0..n).map(|i| ((i as u64 / 3) << 20, i)).collect();
+        let skewed: Vec<(u64, usize)> = (0..n)
+            .map(|i| (((next() % 8) << 32) | (next() & 0xffff_ffff), i))
+            .collect();
+        let constant_low: Vec<(u64, usize)> =
+            (0..n).map(|i| ((next() << 32) | 7, i)).collect();
+        let spread: Vec<(u64, usize)> = (0..n).map(|i| (next() % 1000 * 977, i)).collect();
+        for values in [sorted, skewed, constant_low, spread] {
+            let sorted =
+                Executor::Serial.filter_map_sorted(n, false, |i| Some(values[i]), |&(k, _)| k);
+            let mut reference = values.clone();
+            reference.sort_unstable();
+            assert_eq!(sorted, reference);
+        }
     }
 }
