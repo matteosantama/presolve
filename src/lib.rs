@@ -39,15 +39,16 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-mod executor;
 pub mod matrix;
-mod model;
 pub mod postsolve;
-mod presolve;
 pub mod problem;
 pub mod result;
-mod rules;
 pub mod settings;
+
+mod executor;
+mod model;
+mod presolve;
+mod rules;
 
 pub use presolve::{InitError, Presolver};
 pub use problem::Problem;
