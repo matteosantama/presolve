@@ -317,10 +317,11 @@ impl Default for Progress {
     }
 }
 
-/// Work allowance for one dual propagation pass per medium phase.
+/// Work allowance for the single dual propagation pass after the final phases.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DualPropagationSettings {
-    /// Default: twice the constraint nonzeros, counting column visits.
+    /// Default: four times the constraint nonzeros, counting column visits;
+    /// direction extraction shares the same allowance.
     pub work_limit: WorkLimit,
 }
 
