@@ -10,7 +10,7 @@ use crate::{
 pub struct ConicData {
     pub p: Option<CscMatrix>,
     pub c: Vec<f64>,
-    pub objective_constant: f64,
+    pub c0: f64,
     pub a: CscMatrix,
     pub b: Vec<f64>,
     pub cones: Vec<Cone>,
@@ -190,7 +190,7 @@ impl Problem {
                 problem: ConicData {
                     p: p.map(|p| p.into_csc()),
                     c,
-                    objective_constant: c0,
+                    c0,
                     a: a.into_csc(),
                     b,
                     cones,
@@ -268,7 +268,7 @@ impl Problem {
             problem: ConicData {
                 p: p.map(|p| p.into_csc()),
                 c,
-                objective_constant: c0,
+                c0,
                 a,
                 b,
                 cones,

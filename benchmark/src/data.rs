@@ -94,10 +94,10 @@ fn parse(text: &str) -> Result<Problem> {
         }
     }
     let mut rhs = vec![0.; rows.len()];
-    let mut objective_constant = 0.;
+    let mut c0 = 0.;
     for (name, value) in first_set(source.rhs.as_deref().unwrap_or_default()) {
         if name == objective {
-            objective_constant = -sign * value;
+            c0 = -sign * value;
         } else if let Some(&i) = row_index.get(name) {
             rhs[i] = value;
         }
@@ -195,7 +195,7 @@ fn parse(text: &str) -> Result<Problem> {
     Ok(Problem {
         p,
         c,
-        c0: objective_constant,
+        c0,
         a: CscMatrix::from_triplets(rows.len(), n, ai, aj, av)?.into(),
         rows: bounds.into_iter().map(Constraint::Linear).collect(),
         variable_bounds,
