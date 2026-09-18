@@ -188,7 +188,7 @@ fn parse(text: &str) -> Result<Problem> {
             pj.push(j);
             pv.push(value);
         }
-        Some(CscMatrix::from_triplets(n, n, pi, pj, pv)?.into())
+        Some(CscMatrix::from_triplets(n, n, pi, pj, pv)?)
     } else {
         None
     };
@@ -196,7 +196,7 @@ fn parse(text: &str) -> Result<Problem> {
         p,
         c,
         c0,
-        a: CscMatrix::from_triplets(rows.len(), n, ai, aj, av)?.into(),
+        a: CscMatrix::from_triplets(rows.len(), n, ai, aj, av)?,
         rows: bounds.into_iter().map(Constraint::Linear).collect(),
         variable_bounds,
         cones: vec![],

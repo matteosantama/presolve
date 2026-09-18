@@ -589,11 +589,10 @@ require matching pool modes, which are recorded in result metadata.
 ## Results and postsolve
 
 `presolver.presolve(problem)` consumes a `Problem` and returns an outcome plus
-size and execution statistics. `Problem` is a plain struct whose two matrix
-fields are opaque: `a` is a `ConstraintMatrix` and `p` an optional
-`QuadraticMatrix`, each built from a `CscMatrix` with `into()`. A reduced
-problem keeps the working model's editable storage in those fields, and an
-unchanged problem hands the caller's buffers back untouched. `Presolver::default()` uses the default settings serially;
+size and execution statistics. `Problem` is a plain struct of CSC matrices,
+vectors, and tags; `p` is the upper triangle of the symmetric Hessian on input
+and on output. Presolve works on its own copies, packs a reduced problem back
+into CSC, and hands an unchanged problem's buffers back untouched. `Presolver::default()` uses the default settings serially;
 `Presolver::new(settings)` creates the execution resources once and returns
 `InitError` if they cannot be initialized. That error is separate from
 optimization outcomes:
@@ -620,11 +619,9 @@ adjust them for interiority. Forward warm starts can need solver refinement
 after redundant constraints are removed; they are not guaranteed to remain
 optimal or stationary.
 
-Reduced storage is exported explicitly: `as_csc()` on either matrix borrows
-existing CSC buffers without packing, `into_csc()` on a matrix or on the whole
-`Problem` packs once, and `Problem::into_conic()` expands ranged rows and bounds
-to `Ax + s = b` form. The latter returns an additional map for translating
-conic-form multipliers into native coordinates before postsolve.
+`Problem::into_conic()` expands ranged rows and bounds to `Ax + s = b` form
+and returns an additional map for translating conic-form multipliers into
+native coordinates before postsolve.
 See [results](src/result.rs), [postsolve](src/postsolve/mod.rs), and
 [conic export](src/problem/conic.rs).
 

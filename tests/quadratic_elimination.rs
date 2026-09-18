@@ -11,15 +11,11 @@ use presolve::{
 fn problem() -> Problem {
     Problem {
         p: Some(
-            CscMatrix::from_triplets(2, 2, vec![0, 0, 1], vec![0, 1, 1], vec![1., 1., 3.])
-                .unwrap()
-                .into(),
+            CscMatrix::from_triplets(2, 2, vec![0, 0, 1], vec![0, 1, 1], vec![1., 1., 3.]).unwrap(),
         ),
         c: vec![1., 0.],
         c0: 0.,
-        a: CscMatrix::from_triplets(1, 2, vec![0], vec![1], vec![1.])
-            .unwrap()
-            .into(),
+        a: CscMatrix::from_triplets(1, 2, vec![0], vec![1], vec![1.]).unwrap(),
         rows: vec![Constraint::Linear(Bounds {
             lower: 1.,
             upper: f64::INFINITY,
@@ -52,7 +48,7 @@ fn coupled_free_column_is_minimized_out_of_the_objective() {
     assert_eq!(r.problem.c, [-1.]);
     assert_eq!(r.problem.c0, -0.5);
     let p = r.problem.p.as_ref().unwrap();
-    assert_eq!(p.column(0).collect::<Vec<_>>(), [(0, 2.)]);
+    assert_eq!(p.as_ref().column(0).collect::<Vec<_>>(), [(0, 2.)]);
     // Reduced optimum y = 1 with multiplier 1 on the row.
     let reduced = Solution {
         x: vec![1.],
@@ -85,11 +81,7 @@ fn bounded_or_flat_coupled_columns_are_retained() {
     let result = Presolver::new(settings.clone()).unwrap().presolve(bounded);
     assert!(matches!(result.outcome, Outcome::Unchanged(_)));
     let mut flat = problem();
-    flat.p = Some(
-        CscMatrix::from_triplets(2, 2, vec![0, 1], vec![1, 1], vec![1., 3.])
-            .unwrap()
-            .into(),
-    );
+    flat.p = Some(CscMatrix::from_triplets(2, 2, vec![0, 1], vec![1, 1], vec![1., 3.]).unwrap());
     let result = Presolver::new(settings).unwrap().presolve(flat);
     assert!(matches!(result.outcome, Outcome::Unchanged(_)));
     let off = only(Rules {

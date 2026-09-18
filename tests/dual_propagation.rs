@@ -23,9 +23,7 @@ fn tight_row() -> Problem {
         p: None,
         c: vec![-1., 0.],
         c0: 0.,
-        a: CscMatrix::from_triplets(1, 2, vec![0, 0], vec![0, 1], vec![1., -1.])
-            .unwrap()
-            .into(),
+        a: CscMatrix::from_triplets(1, 2, vec![0, 0], vec![0, 1], vec![1., -1.]).unwrap(),
         rows: vec![Constraint::Linear(Bounds {
             lower: f64::NEG_INFINITY,
             upper: 0.,
@@ -49,9 +47,7 @@ fn fixed_column() -> Problem {
         p: None,
         c: vec![1., 0.5],
         c0: 0.,
-        a: CscMatrix::from_triplets(1, 2, vec![0, 0], vec![0, 1], vec![1., 1.])
-            .unwrap()
-            .into(),
+        a: CscMatrix::from_triplets(1, 2, vec![0, 0], vec![0, 1], vec![1., 1.]).unwrap(),
         rows: vec![Constraint::Linear(Bounds {
             lower: 1.,
             upper: f64::INFINITY,
@@ -139,9 +135,7 @@ fn dual_infeasible_systems_produce_no_reductions() {
         p: None,
         c: vec![-1., -1.],
         c0: 0.,
-        a: CscMatrix::from_triplets(1, 2, vec![0, 0], vec![0, 1], vec![1., -1.])
-            .unwrap()
-            .into(),
+        a: CscMatrix::from_triplets(1, 2, vec![0, 0], vec![0, 1], vec![1., -1.]).unwrap(),
         rows: vec![Constraint::Linear(Bounds {
             lower: f64::NEG_INFINITY,
             upper: 0.,
@@ -166,11 +160,7 @@ fn quadratic_columns_do_not_contribute_dual_rows() {
     // The same data as the tight row, but x carries curvature. Its reduced
     // cost depends on x, so nothing can be proved and the problem is unchanged.
     let mut problem = tight_row();
-    problem.p = Some(
-        CscMatrix::from_triplets(2, 2, vec![0], vec![0], vec![1.])
-            .unwrap()
-            .into(),
-    );
+    problem.p = Some(CscMatrix::from_triplets(2, 2, vec![0], vec![0], vec![1.]).unwrap());
     let result = Presolver::new(only_dual_propagation())
         .unwrap()
         .presolve(problem);

@@ -1,5 +1,5 @@
 //! Experimental arena-backed orthogonal lists for the constraint matrix.
-use crate::matrix::sparse::Entries;
+use crate::matrix::{CscMatrix, sparse::Entries};
 const NONE: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug)]
@@ -225,6 +225,49 @@ impl LinkedMatrix {
     }
     pub fn nnz(&self) -> usize {
         self.nnz
+    }
+    /// Pack `rows`, in that order, into CSC over the compact columns given by
+    /// `stable_to_compact` (`usize::MAX` marks a removed column). Column list
+    /// lengths give the pointers directly, so no counting pass is needed;
+    /// entries in rows outside `rows` are dropped by a compaction that only
+    /// runs if any exist.
+    pub fn pack(&self, rows: &[usize], stable_to_compact: &[usize], columns: usize) -> CscMatrix {
+        let mut pointers = vec![0; columns + 1];
+        for (j, &compact) in stable_to_compact.iter().enumerate() {
+            if compact != NONE as usize {
+                pointers[compact + 1] = self.lists[1][j].len as usize;
+            }
+        }
+        for j in 0..columns {
+            pointers[j + 1] += pointers[j];
+        }
+        let nnz = pointers[columns];
+        let mut next = pointers[..columns].to_vec();
+        let mut ri = vec![0; nnz];
+        let mut values = vec![0.; nnz];
+        let mut filled = 0;
+        for (i, &row) in rows.iter().enumerate() {
+            for (j, v) in self.row(row).iter() {
+                let j = stable_to_compact[j];
+                let at = next[j];
+                ri[at] = i;
+                values[at] = v;
+                next[j] += 1;
+                filled += 1;
+            }
+        }
+        if filled != nnz {
+            let mut packed = vec![0; columns + 1];
+            let mut rows = Vec::with_capacity(filled);
+            let mut vals = Vec::with_capacity(filled);
+            for j in 0..columns {
+                rows.extend_from_slice(&ri[pointers[j]..next[j]]);
+                vals.extend_from_slice(&values[pointers[j]..next[j]]);
+                packed[j + 1] = rows.len();
+            }
+            return CscMatrix::from_parts(rows.len(), columns, packed, rows, vals);
+        }
+        CscMatrix::from_parts(rows.len(), columns, pointers, ri, values)
     }
     pub fn row(&self, row: usize) -> View<'_, 0> {
         View {

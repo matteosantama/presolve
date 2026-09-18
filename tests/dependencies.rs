@@ -23,9 +23,7 @@ fn fixture(quadratic: bool, perturbation: f64, inconsistent: bool) -> Problem {
         .collect();
     Problem {
         p: quadratic.then(|| {
-            CscMatrix::from_triplets(6, 6, (0..6).collect(), (0..6).collect(), vec![1.; 6])
-                .unwrap()
-                .into()
+            CscMatrix::from_triplets(6, 6, (0..6).collect(), (0..6).collect(), vec![1.; 6]).unwrap()
         }),
         c,
         c0: 2.,
@@ -36,8 +34,7 @@ fn fixture(quadratic: bool, perturbation: f64, inconsistent: bool) -> Problem {
             (0..3).flat_map(|_| 0..6).collect(),
             rows.into_iter().flatten().collect(),
         )
-        .unwrap()
-        .into(),
+        .unwrap(),
         rows: rhs
             .into_iter()
             .map(|v| Constraint::Linear(Bounds::fixed(v)))
@@ -64,7 +61,7 @@ fn settings() -> Settings {
     settings
 }
 fn stationarity(data: &Problem, point: &Solution) {
-    let matrix = data.a.as_csc().unwrap();
+    let matrix = &data.a;
     for j in 0..data.c.len() {
         let a = (matrix.column_pointers()[j]..matrix.column_pointers()[j + 1])
             .map(|k| matrix.values()[k] * point.y[matrix.row_indices()[k]])
@@ -99,11 +96,8 @@ fn dependent_equalities_preserve_quadratic_structure_and_dual_warm_starts() {
         let recovered = reduced.postsolve.recover_solution(warm.as_ref());
         assert_eq!(recovered.x, point.x);
         stationarity(&input, &recovered);
-        let output = reduced.problem.into_csc();
-        assert_eq!(
-            input.p.as_ref().and_then(|p| p.as_csc()),
-            output.p.as_ref().and_then(|p| p.as_csc())
-        );
+        let output = reduced.problem;
+        assert_eq!(input.p, output.p);
         assert_eq!(input.c, output.c);
         assert_eq!(input.variable_bounds, output.variable_bounds);
         stationarity(&output, &warm);
@@ -116,7 +110,7 @@ fn dependencies_detect_a_contradiction_but_retain_near_dependencies() {
     let Outcome::Infeasible(certificate) = result.outcome else {
         panic!("expected certificate")
     };
-    let matrix = input.a.as_csc().unwrap();
+    let matrix = &input.a;
     for j in 0..6 {
         let value: f64 = (matrix.column_pointers()[j]..matrix.column_pointers()[j + 1])
             .map(|k| matrix.values()[k] * certificate.y[matrix.row_indices()[k]])
@@ -194,8 +188,7 @@ fn multirow_proofs_survive_prior_dependency_deletions() {
     let input = Problem {
         p: Some(
             CscMatrix::from_triplets(n, n, (0..n).collect(), (0..n).collect(), vec![1.; n])
-                .unwrap()
-                .into(),
+                .unwrap(),
         ),
         c: (0..n)
             .map(|j| -1. + (0..m).map(|i| rows[i][j] * y[i]).sum::<f64>())
@@ -208,8 +201,7 @@ fn multirow_proofs_survive_prior_dependency_deletions() {
             (0..m).flat_map(|_| 0..n).collect(),
             rows.iter().flatten().copied().collect(),
         )
-        .unwrap()
-        .into(),
+        .unwrap(),
         rows: rows
             .iter()
             .map(|r| Constraint::Linear(Bounds::fixed(r.iter().sum())))
@@ -241,7 +233,7 @@ fn multirow_proofs_survive_prior_dependency_deletions() {
     };
     let warm = reduced.postsolve.reduce_warm_start(point.as_ref());
     stationarity(&input, &reduced.postsolve.recover_solution(warm.as_ref()));
-    stationarity(&reduced.problem.into_csc(), &warm);
+    stationarity(&reduced.problem, &warm);
     let mut inconsistent = input;
     let Constraint::Linear(ref mut b) = inconsistent.rows[m - 1] else {
         unreachable!()
@@ -254,7 +246,7 @@ fn multirow_proofs_survive_prior_dependency_deletions() {
     let Outcome::Infeasible(certificate) = result.outcome else {
         panic!("expected contradiction")
     };
-    let matrix = inconsistent.a.as_csc().unwrap();
+    let matrix = &inconsistent.a;
     for j in 0..n {
         let residual: f64 = (matrix.column_pointers()[j]..matrix.column_pointers()[j + 1])
             .map(|k| matrix.values()[k] * certificate.y[matrix.row_indices()[k]])

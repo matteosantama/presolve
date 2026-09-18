@@ -1,10 +1,10 @@
 //! Presolve entry point, working-model preparation, and result packing.
 use crate::{
     executor::Executor,
-    matrix::quadratic::{Quadratic, QuadraticMatrix},
+    matrix::linked::LinkedMatrix,
     model::{Model, RowDomain, tape::Recovery},
     postsolve::{Coordinates, OriginalMap, Postsolve, PrimalCertificate, SolutionRef},
-    problem::{Bounds, Cone, Constraint, ConstraintMatrix, Problem, row_indices},
+    problem::{Bounds, Cone, Constraint, Problem, row_indices},
     result::{Outcome, PresolveResult, ReducedProblem, Size, Stats, UnboundednessCertificate},
     settings::Settings,
 };
@@ -143,12 +143,9 @@ fn working_model(problem: &mut Problem, settings: &Settings, start: Instant) -> 
     } else {
         std::mem::take(&mut problem.variable_bounds)
     };
-    let mut model = Model::from_parts(
-        problem.a.working_matrix(),
-        problem.take_objective(),
-        rows,
-        bounds,
-    );
+    let a = &problem.a;
+    let a = LinkedMatrix::from_columns(a.rows(), a.columns(), |j| a.as_ref().column(j));
+    let mut model = Model::from_parts(a, problem.take_objective(), rows, bounds);
     model.objective.constant = problem.c0;
     model.configure(settings, start.checked_add(settings.time_limit));
     model.set_cones(problem.cones.clone());
@@ -173,10 +170,8 @@ fn finish(
     }
 }
 
-/// Return the input allocations: storage lent to the model comes back, and
-/// empty input bounds stay empty.
+/// Return the input allocations; empty input bounds stay empty.
 fn unchanged(model: Model, mut problem: Problem, free_bounds: bool) -> Outcome {
-    problem.a.restore_working_matrix(model.a);
     problem.c = model.objective.c;
     if !free_bounds {
         problem.variable_bounds = model.bounds;
@@ -327,8 +322,8 @@ fn build_postsolve(
     (postsolve, survivors.cones)
 }
 
-/// Compact the working model's objective, bounds, and domains into a problem
-/// whose constraint storage is the model's, addressed through the survivor maps.
+/// Pack the working model's survivors into a new problem. The input Hessian
+/// is reused when presolve neither edited it nor removed a column.
 fn compact_problem(
     model: Model,
     original: Problem,
@@ -337,7 +332,7 @@ fn compact_problem(
     before: Size,
 ) -> Problem {
     let compact_to_stable_columns = &coordinates.compact_to_stable_columns;
-    let stable_to_compact_columns = Arc::new(inverse(compact_to_stable_columns, model.alive.len()));
+    let stable_to_compact_columns = inverse(compact_to_stable_columns, model.alive.len());
     let n = compact_to_stable_columns.len();
     let p = if model.objective.p.revision == 0
         && compact_to_stable_columns
@@ -347,11 +342,12 @@ fn compact_problem(
     {
         original.p
     } else if original.p.is_some() || model.objective.p.nnz() != 0 {
-        Some(QuadraticMatrix(Quadratic::from_sparse(
-            model.objective.p,
-            Arc::clone(compact_to_stable_columns),
-            Arc::clone(&stable_to_compact_columns),
-        )))
+        Some(
+            model
+                .objective
+                .p
+                .pack_upper(compact_to_stable_columns, &stable_to_compact_columns),
+        )
     } else {
         None
     };
@@ -363,6 +359,12 @@ fn compact_problem(
     }
     c.truncate(n);
     bounds.truncate(n);
+    let packed_rows: Vec<usize> = coordinates
+        .compact_to_stable_linear_rows
+        .iter()
+        .chain(&coordinates.compact_to_stable_conic_rows)
+        .copied()
+        .collect();
     let mut domains = Vec::new();
     for &i in &coordinates.compact_to_stable_linear_rows {
         let RowDomain::Linear(b) = model.rows[i] else {
@@ -392,17 +394,7 @@ fn compact_problem(
         variable_bounds: bounds,
         rows: domains,
         cones,
-        a: ConstraintMatrix::linked(
-            model.a,
-            n,
-            coordinates
-                .compact_to_stable_linear_rows
-                .iter()
-                .chain(&coordinates.compact_to_stable_conic_rows)
-                .copied()
-                .collect(),
-            stable_to_compact_columns,
-        ),
+        a: model.a.pack(&packed_rows, &stable_to_compact_columns, n),
     }
 }
 
@@ -439,10 +431,10 @@ mod tests {
     fn auxiliary_replacing_an_original_column_rebuilds_the_hessian() {
         let p = CscMatrix::from_triplets(2, 2, vec![0, 1], vec![0, 1], vec![2., 3.]).unwrap();
         let mut original = Problem {
-            p: Some(p.into()),
+            p: Some(p),
             c: vec![0.; 2],
             c0: 0.,
-            a: CscMatrix::from_parts(1, 2, vec![0, 1, 2], vec![0, 0], vec![1., 1.]).into(),
+            a: CscMatrix::from_parts(1, 2, vec![0, 1, 2], vec![0, 0], vec![1., 1.]),
             rows: vec![Constraint::Linear(Bounds {
                 lower: f64::NEG_INFINITY,
                 upper: 2.,
@@ -451,7 +443,7 @@ mod tests {
             cones: vec![],
         };
         let mut model = Model::from_parts(
-            original.a.working_matrix(),
+            LinkedMatrix::from_columns(1, 2, |j| original.a.as_ref().column(j)),
             original.take_objective(),
             vec![RowDomain::Linear(Bounds {
                 lower: f64::NEG_INFINITY,
@@ -465,8 +457,7 @@ mod tests {
         let Outcome::Reduced(r) = pack(model, original, (vec![0], vec![]), before) else {
             panic!()
         };
-        let p = r.problem.p.as_ref().unwrap();
-        assert!(p.as_csc().is_none());
+        let p = r.problem.p.as_ref().unwrap().as_ref();
         assert_eq!(p.column(0).collect::<Vec<_>>(), [(0, 3.)]);
         assert_eq!(p.column(1).count(), 0);
         assert_eq!(r.problem.c0, 1.);

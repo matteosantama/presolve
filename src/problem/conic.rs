@@ -2,7 +2,7 @@
 use crate::{
     matrix::CscMatrix,
     postsolve::{PrimalCertificate, Solution},
-    problem::{Bounds, Cone, Constraint, Matrix, Problem, pack_rows, row_indices},
+    problem::{Bounds, Cone, Constraint, Problem, row_indices},
 };
 
 /// CSC conic form. P is still upper triangular; the objective constant is kept.
@@ -188,17 +188,18 @@ impl Problem {
             let Problem { p, c, c0, a, .. } = self;
             return ConicExport {
                 problem: ConicData {
-                    p: p.map(|p| p.into_csc()),
+                    p,
                     c,
                     c0,
-                    a: a.into_csc(),
+                    a,
                     b,
                     cones,
                 },
                 map,
             };
         }
-        let a = if let Matrix::Csc(matrix) = &self.a.0 {
+        let a = {
+            let matrix = &self.a;
             // Scatter each original column through at most two row sides.
             // Sorting is local to a column, never a scan over every (row,col).
             let mut row_map = vec![[None; 2]; self.row_count()];
@@ -233,40 +234,11 @@ impl Problem {
                 pointers.push(values.len());
             }
             CscMatrix::from_parts(outputs.len(), n, pointers, ri, values)
-        } else {
-            let Matrix::Linked {
-                matrix: Some(matrix),
-                compact_to_stable_rows,
-                stable_to_compact_columns,
-                ..
-            } = &self.a.0
-            else {
-                unreachable!("working storage is returned before export")
-            };
-            pack_rows(outputs.len(), n, |i| {
-                let (row, bound, scale) = match outputs[i] {
-                    Output::Row { index, scale, .. } => (
-                        Some(compact_to_stable_rows[linear_rows[index]]),
-                        None,
-                        -scale,
-                    ),
-                    Output::Bound { column, scale, .. } => (None, Some((column, -scale)), 1.),
-                    Output::Cone(i) => (Some(compact_to_stable_rows[conic_rows[i]]), None, 1.),
-                };
-                row.into_iter()
-                    .flat_map(move |i| {
-                        matrix
-                            .row(i)
-                            .iter()
-                            .map(move |(j, v)| (stable_to_compact_columns[j], scale * v))
-                    })
-                    .chain(bound)
-            })
         };
         let Problem { p, c, c0, .. } = self;
         ConicExport {
             problem: ConicData {
-                p: p.map(|p| p.into_csc()),
+                p,
                 c,
                 c0,
                 a,

@@ -32,12 +32,10 @@ fn problem(blocks: usize, quadratic: bool) -> Problem {
     }
     let pv = vec![1.; pi.len()];
     Problem {
-        p: quadratic.then(|| CscMatrix::from_triplets(n, n, pi, pj, pv).unwrap().into()),
+        p: quadratic.then(|| CscMatrix::from_triplets(n, n, pi, pj, pv).unwrap()),
         c: vec![-2.; n],
         c0: 2. * blocks as f64,
-        a: CscMatrix::from_triplets(2 * blocks, n, ai, aj, av)
-            .unwrap()
-            .into(),
+        a: CscMatrix::from_triplets(2 * blocks, n, ai, aj, av).unwrap(),
         rows: (0..blocks)
             .flat_map(|_| {
                 [
@@ -102,13 +100,10 @@ fn same_result(a: PresolveResult, b: PresolveResult, input: &Problem) {
             let recovered = a.postsolve.recover_solution(ar.as_ref());
             same_solution(&recovered, &b.postsolve.recover_solution(br.as_ref()));
             check_optimum(&recovered);
-            let a = a.problem.into_csc();
-            let b = b.problem.into_csc();
-            assert_eq!(a.a.as_csc(), b.a.as_csc());
-            assert_eq!(
-                a.p.as_ref().and_then(|p| p.as_csc()),
-                b.p.as_ref().and_then(|p| p.as_csc())
-            );
+            let a = a.problem;
+            let b = b.problem;
+            assert_eq!(a.a, b.a);
+            assert_eq!(a.p, b.p);
             assert_eq!(a.c, b.c);
             assert_eq!(a.c0, b.c0);
             assert_eq!(a.rows, b.rows);
@@ -125,9 +120,7 @@ fn same_result(a: PresolveResult, b: PresolveResult, input: &Problem) {
             assert_eq!(a.conic_dual, b.conic_dual);
             // Original-coordinate Farkas stationarity and positive contradiction.
             for j in 0..input.c.len() {
-                let value: f64 = column(input.a.as_csc().unwrap(), j)
-                    .map(|(i, v)| v * a.y[i])
-                    .sum();
+                let value: f64 = column(&input.a, j).map(|(i, v)| v * a.y[i]).sum();
                 assert_eq!(value + a.z[j], 0.);
             }
             let contradiction: f64 = input
@@ -149,7 +142,7 @@ fn same_result(a: PresolveResult, b: PresolveResult, input: &Problem) {
             assert!(input.c.iter().zip(&a.ray).map(|(c, x)| c * x).sum::<f64>() < 0.);
             let mut activity = vec![0.; input.rows.len()];
             for (j, x) in a.ray.iter().enumerate() {
-                for (i, v) in column(input.a.as_csc().unwrap(), j) {
+                for (i, v) in column(&input.a, j) {
                     activity[i] += v * x;
                 }
             }
@@ -295,9 +288,7 @@ fn collided_rows(classes: usize, width: usize, factor: f64) -> Problem {
         p: None,
         c: vec![0.; width],
         c0: 0.,
-        a: CscMatrix::from_triplets(m, width, ai, aj, av)
-            .unwrap()
-            .into(),
+        a: CscMatrix::from_triplets(m, width, ai, aj, av).unwrap(),
         rows: vec![
             Constraint::Linear(Bounds {
                 lower: -1.,
@@ -340,12 +331,12 @@ fn hash_collisions_preserve_hidden_classes_with_bounded_comparisons() {
                     &original,
                     &reduced.postsolve.recover_solution(warm.as_ref()),
                 );
-                let data = reduced.problem.into_csc();
+                let data = reduced.problem;
                 if let Some((a, rows)) = reference.as_ref() {
-                    assert_eq!(data.a.as_csc().unwrap(), a);
+                    assert_eq!(&data.a, a);
                     assert_eq!(&data.rows, rows);
                 } else {
-                    reference = Some((data.a.into_csc(), data.rows));
+                    reference = Some((data.a, data.rows));
                 }
             }
         }
@@ -386,8 +377,7 @@ fn redundant_parallel_row_keeps_warm_start_stationarity_without_tightening() {
                 vec![0, 1, 0, 1],
                 vec![1., 1., scale, scale],
             )
-            .unwrap()
-            .into(),
+            .unwrap(),
             rows: vec![
                 Constraint::Linear(Bounds {
                     lower: 1.,

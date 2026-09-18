@@ -27,9 +27,7 @@ fn problem(x: Bounds, y: Bounds) -> Problem {
         p: None,
         c: vec![1., 2., 0.],
         c0: 0.,
-        a: CscMatrix::from_triplets(2, 3, vec![0, 0, 1, 1], vec![0, 1, 1, 2], vec![1.; 4])
-            .unwrap()
-            .into(),
+        a: CscMatrix::from_triplets(2, 3, vec![0, 0, 1, 1], vec![0, 1, 1, 2], vec![1.; 4]).unwrap(),
         rows: vec![
             Constraint::Linear(Bounds {
                 lower: 1.,
@@ -147,8 +145,7 @@ fn identical_support_pairs_are_found_inside_the_parallel_column_scan() {
             vec![0, 0, 1, 1, 2],
             vec![1., 1., 1., 1., 1.],
         )
-        .unwrap()
-        .into(),
+        .unwrap(),
         rows: vec![
             Constraint::Linear(Bounds {
                 lower: 1.,
@@ -201,11 +198,7 @@ fn super_problem() -> Problem {
 #[test]
 fn quadratic_and_boxed_columns_are_left_alone() {
     let mut curved = problem(NONNEGATIVE, NONNEGATIVE);
-    curved.p = Some(
-        CscMatrix::from_triplets(3, 3, vec![1], vec![1], vec![1.])
-            .unwrap()
-            .into(),
-    );
+    curved.p = Some(CscMatrix::from_triplets(3, 3, vec![1], vec![1], vec![1.]).unwrap());
     let result = Presolver::new(only_dominated_columns())
         .unwrap()
         .presolve(curved);

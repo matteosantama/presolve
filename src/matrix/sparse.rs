@@ -4,7 +4,6 @@
 //! variable, all held in a single arena. Indices remain stable until final
 //! packing.
 
-#[cfg(test)]
 use crate::matrix::CscMatrix;
 
 pub(crate) type Entries = Vec<(usize, f64)>;
@@ -102,6 +101,33 @@ impl SymmetricMatrix {
         j
     }
 
+    /// Upper triangle in CSC over compact columns. `compact_to_stable` lists
+    /// the surviving stable columns in output order and `stable_to_compact`
+    /// is its inverse, with `usize::MAX` for removed columns.
+    pub fn pack_upper(
+        &self,
+        compact_to_stable: &[usize],
+        stable_to_compact: &[usize],
+    ) -> CscMatrix {
+        let n = compact_to_stable.len();
+        let nnz = self.nnz();
+        let capacity = nnz.min(nnz / 2 + n);
+        let mut pointers = Vec::with_capacity(n + 1);
+        let mut rows = Vec::with_capacity(capacity);
+        let mut values = Vec::with_capacity(capacity);
+        pointers.push(0);
+        for (j, &old) in compact_to_stable.iter().enumerate() {
+            for &(i, v) in self.column(old) {
+                let row = stable_to_compact[i];
+                if row <= j {
+                    rows.push(row);
+                    values.push(v);
+                }
+            }
+            pointers.push(values.len());
+        }
+        CscMatrix::from_parts(n, n, pointers, rows, values)
+    }
     pub fn nnz(&self) -> usize {
         self.nnz
     }
