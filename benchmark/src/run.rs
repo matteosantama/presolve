@@ -133,7 +133,7 @@ pub fn measure(
     let ready = if mode == PoolMode::Reused {
         let presolver = Presolver::new(settings.clone())?;
         if timed {
-            drop(presolver.presolve(input.clone()));
+            drop(presolver.presolve(presolve::Problem::from(input.clone())));
         }
         Some(presolver)
     } else {
@@ -147,7 +147,7 @@ pub fn measure(
         Some(presolver) => presolver,
         None => Presolver::new(black_box(settings).clone())?,
     };
-    let result = presolver.presolve(input);
+    let result = presolver.presolve(presolve::Problem::from(input));
     let elapsed_ns = start.map(|start| start.elapsed().as_nanos().min(u64::MAX as u128) as u64);
     let after_bound_sides = match &result.outcome {
         Outcome::Unchanged(p) => Some(bound_sides(

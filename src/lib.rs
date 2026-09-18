@@ -16,7 +16,7 @@
 
 //!
 //! ```
-//! use ::presolve::{presolve, Outcome, Settings};
+//! use ::presolve::{Outcome, Presolver, Problem};
 //! use ::presolve::matrix::CscMatrix;
 //! use ::presolve::problem::{Bounds, ProblemData};
 //! let problem = ProblemData {
@@ -24,7 +24,7 @@
 //!     a: CscMatrix::zeros(0, 1)?, rows: vec![],
 //!     variable_bounds: vec![Bounds { lower: 2.0, upper: 4.0 }], cones: vec![],
 //! };
-//! let result = presolve(problem, &Settings::default())?;
+//! let result = Presolver::default().presolve(Problem::from(problem));
 //! if let Outcome::Solved(solution) = result.outcome {
 //!     assert_eq!(solution.x, [2.0]);
 //!     assert_eq!(solution.z, [1.0]);
@@ -40,7 +40,7 @@ pub mod problem;
 pub mod result;
 pub mod settings;
 
-pub use presolve::{InitError, Presolver, presolve};
+pub use presolve::{InitError, Presolver};
 pub use problem::Problem;
 pub use result::Outcome;
 pub use settings::Settings;

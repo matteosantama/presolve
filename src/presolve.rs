@@ -31,6 +31,16 @@ pub struct Presolver {
     executor: Executor,
 }
 
+/// Default settings run serially, so construction cannot fail.
+impl Default for Presolver {
+    fn default() -> Self {
+        Self {
+            settings: Settings::default(),
+            executor: Executor::Serial,
+        }
+    }
+}
+
 impl Presolver {
     /// Configure execution once. A thread count of 1 creates no worker threads;
     /// 0 lets Rayon choose automatically. Pool creation errors are returned.
@@ -53,21 +63,11 @@ impl Presolver {
     /// elapsed statistic start fresh for each call and exclude `Self::new`.
     /// No constraint output matrices are built until explicitly exported.
     /// Input validity is the caller's responsibility.
-    pub fn presolve(&self, problem: impl Into<Problem>) -> PresolveResult {
-        let start = Instant::now();
-        presolve_owned(problem.into(), &self.settings, &self.executor, start)
+    pub fn presolve(&self, problem: Problem) -> PresolveResult {
+        presolve_owned(problem, &self.settings, &self.executor, Instant::now())
     }
 }
 
-/// Presolve one problem with temporary execution resources.
-/// Use `Presolver` to reuse the pool across calls. Initialization errors are
-/// distinct from optimization outcomes such as infeasibility or unboundedness.
-pub fn presolve(
-    problem: impl Into<Problem>,
-    settings: &Settings,
-) -> Result<PresolveResult, InitError> {
-    Ok(Presolver::new(settings.clone())?.presolve(problem))
-}
 fn presolve_owned(
     mut problem: Problem,
     settings: &Settings,

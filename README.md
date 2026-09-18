@@ -588,11 +588,12 @@ require matching pool modes, which are recorded in result metadata.
 
 ## Results and postsolve
 
-`presolver.presolve(problem)` consumes the problem and returns an outcome plus
-size and execution statistics. The one-shot helper `presolve(problem, &settings)`
-creates temporary execution resources and returns `Result<PresolveResult,
-InitError>`; use `presolve(problem, &settings)?` to propagate initialization
-failures. These errors are separate from optimization outcomes:
+`presolver.presolve(problem)` consumes a `Problem`, built with
+`Problem::from(ProblemData)`, and returns an outcome plus size and execution
+statistics. `Presolver::default()` uses the default settings serially;
+`Presolver::new(settings)` creates the execution resources once and returns
+`InitError` if they cannot be initialized. That error is separate from
+optimization outcomes:
 
 | Outcome | Meaning |
 | --- | --- |

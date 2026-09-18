@@ -67,7 +67,7 @@ fn fixed_column() -> ProblemData {
 fn strictly_negative_multiplier_makes_the_row_tight_and_fixes_its_bound() {
     let result = Presolver::new(only_dual_propagation())
         .unwrap()
-        .presolve(tight_row());
+        .presolve(presolve::Problem::from(tight_row()));
     let Outcome::Reduced(r) = result.outcome else {
         panic!("expected a reduced problem")
     };
@@ -92,7 +92,7 @@ fn strictly_negative_multiplier_makes_the_row_tight_and_fixes_its_bound() {
 fn default_pipeline_solves_the_tight_row_problem() {
     let result = Presolver::new(Settings::default())
         .unwrap()
-        .presolve(tight_row());
+        .presolve(presolve::Problem::from(tight_row()));
     let Outcome::Solved(solution) = result.outcome else {
         panic!("expected a solved problem")
     };
@@ -107,7 +107,7 @@ fn default_pipeline_solves_the_tight_row_problem() {
 fn strictly_positive_reduced_cost_fixes_a_locked_column() {
     let result = Presolver::new(only_dual_propagation())
         .unwrap()
-        .presolve(fixed_column());
+        .presolve(presolve::Problem::from(fixed_column()));
     let Outcome::Reduced(r) = result.outcome else {
         panic!("expected a reduced problem")
     };
@@ -151,7 +151,7 @@ fn dual_infeasible_systems_produce_no_reductions() {
     };
     let result = Presolver::new(only_dual_propagation())
         .unwrap()
-        .presolve(problem);
+        .presolve(presolve::Problem::from(problem));
     assert!(matches!(result.outcome, Outcome::Unchanged(_)));
 }
 
@@ -163,6 +163,6 @@ fn quadratic_columns_do_not_contribute_dual_rows() {
     problem.p = Some(CscMatrix::from_triplets(2, 2, vec![0], vec![0], vec![1.]).unwrap());
     let result = Presolver::new(only_dual_propagation())
         .unwrap()
-        .presolve(problem);
+        .presolve(presolve::Problem::from(problem));
     assert!(matches!(result.outcome, Outcome::Unchanged(_)));
 }

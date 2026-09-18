@@ -62,15 +62,13 @@ fn problem(blocks: usize, quadratic: bool) -> ProblemData {
 }
 
 fn run(input: &ProblemData, rules: Rules, threads: usize) -> PresolveResult {
-    presolve::presolve(
-        input.clone(),
-        &Settings {
-            rules,
-            threads,
-            ..Settings::default()
-        },
-    )
+    Presolver::new(Settings {
+        rules,
+        threads,
+        ..Settings::default()
+    })
     .unwrap()
+    .presolve(presolve::Problem::from(input.clone()))
 }
 
 fn same_solution(a: &Solution, b: &Solution) {
@@ -244,11 +242,11 @@ fn reusable_presolver_supports_concurrent_calls_and_independent_results() {
     let large = problem(BLOCKS, true);
     let small = problem(2, true);
     let (first, second) = std::thread::scope(|scope| {
-        let a = scope.spawn(|| presolver.presolve(large.clone()));
-        let b = scope.spawn(|| presolver.presolve(small.clone()));
+        let a = scope.spawn(|| presolver.presolve(presolve::Problem::from(large.clone())));
+        let b = scope.spawn(|| presolver.presolve(presolve::Problem::from(small.clone())));
         (a.join().unwrap(), b.join().unwrap())
     });
-    let third = presolver.presolve(large.clone());
+    let third = presolver.presolve(presolve::Problem::from(large.clone()));
     drop(presolver);
     // Postsolve and reduced storage outlive the executor and all later calls.
     same_result(run(&large, rules, 1), first, &large);

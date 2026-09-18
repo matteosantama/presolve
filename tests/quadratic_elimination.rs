@@ -39,7 +39,9 @@ fn coupled_free_column_is_minimized_out_of_the_objective() {
         quadratic_elimination: true,
         ..Rules::none()
     });
-    let result = Presolver::new(settings).unwrap().presolve(problem());
+    let result = Presolver::new(settings)
+        .unwrap()
+        .presolve(presolve::Problem::from(problem()));
     assert!(result.stats.quadratic_changed);
     let Outcome::Reduced(r) = result.outcome else {
         panic!("expected a reduced problem")
@@ -78,17 +80,23 @@ fn bounded_or_flat_coupled_columns_are_retained() {
         lower: -1.,
         upper: 1.,
     };
-    let result = Presolver::new(settings.clone()).unwrap().presolve(bounded);
+    let result = Presolver::new(settings.clone())
+        .unwrap()
+        .presolve(presolve::Problem::from(bounded));
     assert!(matches!(result.outcome, Outcome::Unchanged(_)));
     let mut flat = problem();
     flat.p = Some(CscMatrix::from_triplets(2, 2, vec![0, 1], vec![1, 1], vec![1., 3.]).unwrap());
-    let result = Presolver::new(settings).unwrap().presolve(flat);
+    let result = Presolver::new(settings)
+        .unwrap()
+        .presolve(presolve::Problem::from(flat));
     assert!(matches!(result.outcome, Outcome::Unchanged(_)));
     let off = only(Rules {
         empty_columns: true,
         ..Rules::none()
     });
-    let result = Presolver::new(off).unwrap().presolve(problem());
+    let result = Presolver::new(off)
+        .unwrap()
+        .presolve(presolve::Problem::from(problem()));
     assert!(matches!(result.outcome, Outcome::Unchanged(_)));
 }
 
@@ -96,7 +104,7 @@ fn bounded_or_flat_coupled_columns_are_retained() {
 fn default_pipeline_solves_the_example() {
     let result = Presolver::new(Settings::default())
         .unwrap()
-        .presolve(problem());
+        .presolve(presolve::Problem::from(problem()));
     let Outcome::Solved(solution) = result.outcome else {
         panic!("expected a solved problem")
     };

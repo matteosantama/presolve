@@ -73,7 +73,9 @@ fn stationarity(data: &ProblemData, point: &Solution) {
 fn dependent_equalities_preserve_quadratic_structure_and_dual_warm_starts() {
     for quadratic in [false, true] {
         let input = fixture(quadratic, 0., false);
-        let result = Presolver::new(settings()).unwrap().presolve(input.clone());
+        let result = Presolver::new(settings())
+            .unwrap()
+            .presolve(presolve::Problem::from(input.clone()));
         let after = result.stats.after.unwrap();
         assert_eq!(
             (after.variables, after.linear_rows, after.a_nonzeros),
@@ -105,7 +107,9 @@ fn dependent_equalities_preserve_quadratic_structure_and_dual_warm_starts() {
 #[test]
 fn dependencies_detect_a_contradiction_but_retain_near_dependencies() {
     let input = fixture(true, 0., true);
-    let result = Presolver::new(settings()).unwrap().presolve(input.clone());
+    let result = Presolver::new(settings())
+        .unwrap()
+        .presolve(presolve::Problem::from(input.clone()));
     let Outcome::Infeasible(certificate) = result.outcome else {
         panic!("expected certificate")
     };
@@ -129,7 +133,7 @@ fn dependencies_detect_a_contradiction_but_retain_near_dependencies() {
     assert!(contradiction > 0.);
     let result = Presolver::new(settings())
         .unwrap()
-        .presolve(fixture(true, 1e-10, false));
+        .presolve(presolve::Problem::from(fixture(true, 1e-10, false)));
     assert!(matches!(result.outcome, Outcome::Unchanged(_)));
 }
 #[test]
@@ -150,7 +154,7 @@ fn scratch_and_work_limits_do_not_partially_transform_the_problem() {
     for s in variants {
         let result = Presolver::new(s)
             .unwrap()
-            .presolve(fixture(true, 0., false));
+            .presolve(presolve::Problem::from(fixture(true, 0., false)));
         assert!(matches!(result.outcome, Outcome::Unchanged(_)));
     }
 }
@@ -217,7 +221,7 @@ fn multirow_proofs_survive_prior_dependency_deletions() {
     options.dependencies.max_basis_rows = rank;
     let result = Presolver::new(options.clone())
         .unwrap()
-        .presolve(input.clone());
+        .presolve(presolve::Problem::from(input.clone()));
     assert_eq!(result.stats.after.unwrap().linear_rows, rank);
     let Outcome::Reduced(reduced) = result.outcome else {
         panic!("expected reduction")
@@ -240,7 +244,7 @@ fn multirow_proofs_survive_prior_dependency_deletions() {
     b.upper += 1.;
     let result = Presolver::new(options)
         .unwrap()
-        .presolve(inconsistent.clone());
+        .presolve(presolve::Problem::from(inconsistent.clone()));
     let Outcome::Infeasible(certificate) = result.outcome else {
         panic!("expected contradiction")
     };

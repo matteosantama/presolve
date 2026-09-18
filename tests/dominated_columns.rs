@@ -59,7 +59,7 @@ const NONNEGATIVE: Bounds = Bounds {
 fn dominated_column_is_fixed_at_its_lower_bound() {
     let result = Presolver::new(only_dominated_columns())
         .unwrap()
-        .presolve(problem(NONNEGATIVE, NONNEGATIVE));
+        .presolve(presolve::Problem::from(problem(NONNEGATIVE, NONNEGATIVE)));
     let Outcome::Reduced(r) = result.outcome else {
         panic!("expected a reduced problem")
     };
@@ -81,18 +81,19 @@ fn dominated_column_is_fixed_at_its_lower_bound() {
 
 #[test]
 fn dominating_column_is_fixed_at_its_upper_bound_when_the_other_is_free_below() {
-    let result = Presolver::new(only_dominated_columns())
-        .unwrap()
-        .presolve(problem(
-            Bounds {
-                lower: 0.,
-                upper: 3.,
-            },
-            Bounds {
-                lower: f64::NEG_INFINITY,
-                upper: f64::INFINITY,
-            },
-        ));
+    let result =
+        Presolver::new(only_dominated_columns())
+            .unwrap()
+            .presolve(presolve::Problem::from(problem(
+                Bounds {
+                    lower: 0.,
+                    upper: 3.,
+                },
+                Bounds {
+                    lower: f64::NEG_INFINITY,
+                    upper: f64::INFINITY,
+                },
+            )));
     let Outcome::Reduced(r) = result.outcome else {
         panic!("expected a reduced problem")
     };
@@ -123,7 +124,7 @@ fn unbounded_shift_direction_is_reported() {
     });
     let result = Presolver::new(only_dominated_columns())
         .unwrap()
-        .presolve(unbounded);
+        .presolve(presolve::Problem::from(unbounded));
     let Outcome::Unbounded(certificate) = result.outcome else {
         panic!("expected an unbounded certificate")
     };
@@ -169,7 +170,7 @@ fn identical_support_pairs_are_found_inside_the_parallel_column_scan() {
     };
     let result = Presolver::new(settings.clone())
         .unwrap()
-        .presolve(problem.clone());
+        .presolve(presolve::Problem::from(problem.clone()));
     let Outcome::Reduced(r) = result.outcome else {
         panic!("expected a reduced problem")
     };
@@ -187,7 +188,9 @@ fn identical_support_pairs_are_found_inside_the_parallel_column_scan() {
     assert_eq!(recovered.x, [1., 0., 0.]);
     assert_eq!(recovered.z, [0., 1., 0.]);
     // Without the general search, the nested-support pairs stay untouched.
-    let nested = Presolver::new(settings).unwrap().presolve(super_problem());
+    let nested = Presolver::new(settings)
+        .unwrap()
+        .presolve(presolve::Problem::from(super_problem()));
     assert!(matches!(nested.outcome, Outcome::Unchanged(_)));
 }
 
@@ -201,7 +204,7 @@ fn quadratic_and_boxed_columns_are_left_alone() {
     curved.p = Some(CscMatrix::from_triplets(3, 3, vec![1], vec![1], vec![1.]).unwrap());
     let result = Presolver::new(only_dominated_columns())
         .unwrap()
-        .presolve(curved);
+        .presolve(presolve::Problem::from(curved));
     assert!(matches!(result.outcome, Outcome::Unchanged(_)));
     let boxed = problem(
         Bounds {
@@ -215,6 +218,6 @@ fn quadratic_and_boxed_columns_are_left_alone() {
     );
     let result = Presolver::new(only_dominated_columns())
         .unwrap()
-        .presolve(boxed);
+        .presolve(presolve::Problem::from(boxed));
     assert!(matches!(result.outcome, Outcome::Unchanged(_)));
 }

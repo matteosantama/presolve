@@ -111,7 +111,9 @@ fn wide_quadratic_substitution_preserves_objective_kkt_and_retained_bounds() {
             *value *= sign;
         }
         p.rows[0] = Constraint::Linear(Bounds::fixed(sign * 12.));
-        let result = Presolver::new(settings()).unwrap().presolve(p.clone());
+        let result = Presolver::new(settings())
+            .unwrap()
+            .presolve(presolve::Problem::from(p.clone()));
         let size = result.stats.after.unwrap();
         assert_eq!(size.variables, 11);
         assert_eq!(size.linear_rows, usize::from(bounded));
@@ -173,7 +175,9 @@ fn structural_and_fill_policies_independently_block_the_same_substitution() {
     s.equalities.work_limit = WorkLimit::Entries(0);
     cases.push(s);
     for s in cases {
-        let r = Presolver::new(s).unwrap().presolve(p.clone());
+        let r = Presolver::new(s)
+            .unwrap()
+            .presolve(presolve::Problem::from(p.clone()));
         assert!(matches!(r.outcome, Outcome::Unchanged(_)));
         assert_eq!(r.stats.before, r.stats.after.unwrap());
     }
@@ -183,7 +187,9 @@ fn structural_and_fill_policies_independently_block_the_same_substitution() {
 fn zero_time_budget_leaves_a_valid_unchanged_problem() {
     let mut s = settings();
     s.time_limit = Duration::ZERO;
-    let r = Presolver::new(s).unwrap().presolve(equation(12, true));
+    let r = Presolver::new(s)
+        .unwrap()
+        .presolve(presolve::Problem::from(equation(12, true)));
     assert!(r.stats.time_limit_reached);
     assert!(matches!(r.outcome, Outcome::Unchanged(_)));
     assert_eq!(r.stats.before, r.stats.after.unwrap());
@@ -227,7 +233,9 @@ fn propagation_rounds_work_and_progress_control_bound_only_chains() {
     };
     base.propagation.additional_rounds = 0;
     let lower = |s| {
-        let r = Presolver::new(s).unwrap().presolve(p.clone());
+        let r = Presolver::new(s)
+            .unwrap()
+            .presolve(presolve::Problem::from(p.clone()));
         let Outcome::Reduced(r) = r.outcome else {
             panic!("expected bound changes")
         };
@@ -280,7 +288,11 @@ fn sparsification_can_exclude_auxiliary_variables_and_limit_work() {
         },
         ..Settings::default()
     };
-    let run = |s| Presolver::new(s).unwrap().presolve(p.clone());
+    let run = |s| {
+        Presolver::new(s)
+            .unwrap()
+            .presolve(presolve::Problem::from(p.clone()))
+    };
     assert_eq!(run(base.clone()).stats.after.unwrap().variables, n + 1);
     let mut equality_only = base.clone();
     equality_only.sparsification.allow_auxiliary_variables = false;
@@ -307,7 +319,9 @@ fn near_dependent_equalities_do_not_create_roundoff_pivots() {
         Constraint::Linear(Bounds::fixed(3.)),
         Constraint::Linear(Bounds::fixed(3. + 3e-12)),
     ];
-    let result = Presolver::new(settings()).unwrap().presolve(p.clone());
+    let result = Presolver::new(settings())
+        .unwrap()
+        .presolve(presolve::Problem::from(p.clone()));
     let Outcome::Unchanged(output) = result.outcome else {
         panic!("ill-conditioned substitutions should be rejected")
     };
@@ -334,7 +348,9 @@ fn exhaustive_cycles_revisit_equalities_after_pivot_degrees_change() {
     p.rows = vec![Constraint::Linear(Bounds::fixed(0.)); 3];
     let mut s = settings();
     s.equalities.max_column_length = 2;
-    let r = Presolver::new(s).unwrap().presolve(p);
+    let r = Presolver::new(s)
+        .unwrap()
+        .presolve(presolve::Problem::from(p));
     assert_eq!(r.stats.after.unwrap().linear_rows, 0);
     assert_eq!(r.stats.after.unwrap().variables, 4);
 }
@@ -374,12 +390,14 @@ fn alternative_pivots_recover_after_a_fill_rejection() {
     options.equalities.max_pivot_attempts = 1;
     let first = Presolver::new(options.clone())
         .unwrap()
-        .presolve(input.clone());
+        .presolve(presolve::Problem::from(input.clone()));
     assert_eq!(first.stats.after.unwrap().variables, 4);
     assert_eq!(first.stats.equalities.rejected_updates, 1);
     assert_eq!(first.stats.equalities.constraint_fill_rejections, 1);
     options.equalities.max_pivot_attempts = 2;
-    let next = Presolver::new(options).unwrap().presolve(input.clone());
+    let next = Presolver::new(options)
+        .unwrap()
+        .presolve(presolve::Problem::from(input.clone()));
     assert_eq!(next.stats.after.unwrap().variables, 3);
     assert_eq!(next.stats.equalities.attempts, 2);
     assert_eq!(next.stats.equalities.accepted, 1);
@@ -408,7 +426,7 @@ fn candidate_scoring_counts_quadratic_work_and_pivot_screening_is_configurable()
     assert_eq!(
         Presolver::new(options.clone())
             .unwrap()
-            .presolve(input.clone())
+            .presolve(presolve::Problem::from(input.clone()))
             .stats
             .after
             .unwrap()
@@ -418,7 +436,7 @@ fn candidate_scoring_counts_quadratic_work_and_pivot_screening_is_configurable()
     options.equalities.cost_aware = true;
     let result = Presolver::new(options.clone())
         .unwrap()
-        .presolve(input.clone());
+        .presolve(presolve::Problem::from(input.clone()));
     assert_eq!(result.stats.after.unwrap().variables, 2);
     assert_eq!(result.stats.after.unwrap().p_nonzeros, 1);
     input.a.values_mut()[0] = 2.;
@@ -428,7 +446,7 @@ fn candidate_scoring_counts_quadratic_work_and_pivot_screening_is_configurable()
         assert_eq!(
             Presolver::new(options.clone())
                 .unwrap()
-                .presolve(input.clone())
+                .presolve(presolve::Problem::from(input.clone()))
                 .stats
                 .after
                 .unwrap()
@@ -440,7 +458,7 @@ fn candidate_scoring_counts_quadratic_work_and_pivot_screening_is_configurable()
     assert_eq!(
         Presolver::new(options)
             .unwrap()
-            .presolve(input)
+            .presolve(presolve::Problem::from(input))
             .stats
             .after
             .unwrap()
@@ -503,7 +521,9 @@ fn pivot_policies_preserve_known_quadratic_optima() {
                 options.equalities.relative_pivot = relative;
                 options.equalities.cost_aware = aware;
                 options.equalities.max_pivot_attempts = 4;
-                let result = Presolver::new(options).unwrap().presolve(input.clone());
+                let result = Presolver::new(options)
+                    .unwrap()
+                    .presolve(presolve::Problem::from(input.clone()));
                 match result.outcome {
                     Outcome::Reduced(reduced) => {
                         let warm = reduced.postsolve.reduce_warm_start(optimum.as_ref());
@@ -553,7 +573,7 @@ fn propagation_gain_controls_are_independent_and_preserve_dual_recovery() {
         assert!(matches!(
             Presolver::new(options.clone())
                 .unwrap()
-                .presolve(input.clone())
+                .presolve(presolve::Problem::from(input.clone()))
                 .outcome,
             Outcome::Unchanged(_)
         ));
@@ -562,13 +582,15 @@ fn propagation_gain_controls_are_independent_and_preserve_dual_recovery() {
             assert!(matches!(
                 Presolver::new(options.clone())
                     .unwrap()
-                    .presolve(input.clone())
+                    .presolve(presolve::Problem::from(input.clone()))
                     .outcome,
                 Outcome::Unchanged(_)
             ));
         }
         options.propagation.minimum_gain_factor = 1.;
-        let result = Presolver::new(options).unwrap().presolve(input.clone());
+        let result = Presolver::new(options)
+            .unwrap()
+            .presolve(presolve::Problem::from(input.clone()));
         let Outcome::Reduced(reduced) = result.outcome else {
             panic!("expected tighter bounds")
         };
