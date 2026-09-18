@@ -78,12 +78,13 @@ impl Extreme {
         }
         self.sum.is_finite()
     }
+    /// Branch free: `sum` starts at +0.0 and only finite terms are added, so
+    /// it is never -0.0 and adding 0.0 leaves it bit-identical.
+    #[inline]
     fn add(&mut self, term: f64) {
-        if term.is_finite() {
-            self.sum += term;
-        } else {
-            self.infinite += 1;
-        }
+        let finite = term.is_finite();
+        self.sum += if finite { term } else { 0.0 };
+        self.infinite += usize::from(!finite);
     }
 
     #[inline]
@@ -226,14 +227,24 @@ impl Activity {
         }
     }
 
-    pub fn compute(
+    pub fn compute(row: impl IntoIterator<Item = (usize, f64)>, bounds: &[Bounds]) -> Self {
+        let mut out = Self::default();
+        for (j, a) in row {
+            let (min, max) = Self::terms(a, bounds[j]);
+            out.min.add(min);
+            out.max.add(max);
+        }
+        out
+    }
+    /// The activity without the term of column `exclude`.
+    pub fn compute_excluding(
         row: impl IntoIterator<Item = (usize, f64)>,
         bounds: &[Bounds],
-        exclude: Option<usize>,
+        exclude: usize,
     ) -> Self {
         let mut out = Self::default();
         for (j, a) in row {
-            if Some(j) == exclude {
+            if j == exclude {
                 continue;
             }
             let (min, max) = Self::terms(a, bounds[j]);
@@ -277,7 +288,7 @@ mod tests {
                 upper: 4.0,
             },
         ];
-        let act = Activity::compute([(0, 2.0), (1, -1.0)], &bounds, None);
+        let act = Activity::compute([(0, 2.0), (1, -1.0)], &bounds);
         assert_eq!(act.min.value(), Some(0.0));
         assert_eq!(act.max.value(), None);
         assert_eq!(act.max.excluding(f64::INFINITY), Some(-3.0));

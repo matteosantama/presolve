@@ -64,6 +64,7 @@ pub(crate) struct Model {
     /// scan ran, so an exact repeat on an unchanged model is skipped.
     pub parallel_rows_seen: usize,
     pub parallel_columns_seen: usize,
+    pub coupled_fix_seen: usize,
     /// Run configuration, applied once by `configure`.
     pub settings: crate::settings::Settings,
     pub dual_scratch: crate::rules::dual_propagation::DualScratch,
@@ -205,6 +206,7 @@ impl Model {
             rows_revision: 0,
             parallel_rows_seen: usize::MAX,
             parallel_columns_seen: usize::MAX,
+            coupled_fix_seen: usize::MAX,
             settings: crate::settings::Settings::default(),
             dual_scratch: Default::default(),
             dominated_scratch: Default::default(),
@@ -328,7 +330,7 @@ impl Model {
     #[inline]
     pub fn activity(&mut self, row: usize) -> Activity {
         if self.activities[row].min.infinite == STALE {
-            self.activities[row] = Activity::compute(self.a.row(row), &self.bounds, None);
+            self.activities[row] = Activity::compute(self.a.row(row), &self.bounds);
         }
         self.activities[row]
     }
@@ -336,7 +338,7 @@ impl Model {
     pub fn residual_activity(&self, row: usize, column: usize) -> Activity {
         // This direct path is the cancellation fallback for the propagation
         // rule, which first tries subtracting from cached extremes.
-        Activity::compute(self.a.row(row), &self.bounds, Some(column))
+        Activity::compute_excluding(self.a.row(row), &self.bounds, column)
     }
 
     pub(super) fn replace_row(&mut self, row: usize, entries: &[(usize, f64)], domain: RowDomain) {

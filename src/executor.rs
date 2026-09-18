@@ -267,8 +267,7 @@ mod tests {
         let skewed: Vec<(u64, usize)> = (0..n)
             .map(|i| (((next() % 8) << 32) | (next() & 0xffff_ffff), i))
             .collect();
-        let constant_low: Vec<(u64, usize)> =
-            (0..n).map(|i| ((next() << 32) | 7, i)).collect();
+        let constant_low: Vec<(u64, usize)> = (0..n).map(|i| ((next() << 32) | 7, i)).collect();
         let spread: Vec<(u64, usize)> = (0..n).map(|i| (next() % 1000 * 977, i)).collect();
         for values in [sorted, skewed, constant_low, spread] {
             let sorted =

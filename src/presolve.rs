@@ -74,7 +74,20 @@ fn presolve_owned(
     // after domains have been deleted.
     let input_rows = row_indices(&problem.rows);
     let mut model = working_model(&mut problem, settings, start);
-    let before = size(&model);
+    let before = if input_rows.1.is_empty() {
+        // Every column is alive, every row linear, and the arena stores no
+        // explicit zeros, so the walk in `size` would reproduce these counts.
+        Size {
+            variables: n,
+            linear_rows: model.rows.len(),
+            conic_rows: 0,
+            a_nonzeros: model.a.nnz(),
+            g_nonzeros: 0,
+            p_nonzeros: model.objective.p.nnz(),
+        }
+    } else {
+        size(&model)
+    };
     let mut stats = Stats {
         equalities: Default::default(),
         elapsed: Duration::ZERO,
@@ -162,7 +175,11 @@ fn finish(
     stats: &mut Stats,
 ) -> Outcome {
     // With no edits this equals `before`, so both paths report the same size.
-    stats.after = Some(size(&model));
+    stats.after = Some(if model.revision == 0 {
+        before
+    } else {
+        size(&model)
+    });
     if model.revision == 0 {
         unchanged(model, problem, free_bounds)
     } else {

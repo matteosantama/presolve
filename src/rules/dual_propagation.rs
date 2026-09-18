@@ -184,7 +184,7 @@ impl Model {
                 if !self.linear_column(j) {
                     continue;
                 }
-                let activity = Activity::compute(column, &scratch.y, None);
+                let activity = Activity::compute(column, &scratch.y);
                 scratch.column_activity[j] = Some(activity);
                 if (range.upper.is_finite()
                     && activity
@@ -209,7 +209,7 @@ impl Model {
                 }
                 for (i, a) in column {
                     let (from_lower, from_upper) = activity.implied(a, scratch.y[i], range, || {
-                        Activity::compute(column, &scratch.y, Some(i))
+                        Activity::compute_excluding(column, &scratch.y, i)
                     });
                     // A positive coefficient turns the lower constraint into a
                     // lower bound; a negative one flips the sides.
@@ -293,7 +293,7 @@ impl Model {
                 // column's entries and every multiplier unchanged.
                 let activity = match scratch.column_activity[j] {
                     Some(activity) if complete => activity,
-                    _ => Activity::compute(self.a.column(j), &scratch.y, None),
+                    _ => Activity::compute(self.a.column(j), &scratch.y),
                 };
                 let side = if b.lower.is_finite()
                     && activity
