@@ -17,6 +17,24 @@ fn packed_sides(bounds: Bounds) -> usize {
     }
 }
 
+/// Per-row state of one reference row's candidate scan.
+#[derive(Clone, Copy)]
+struct Scan {
+    seen: usize,
+    ratio: f64,
+    count: usize,
+}
+
+impl Default for Scan {
+    fn default() -> Self {
+        Self {
+            seen: usize::MAX,
+            ratio: 0.0,
+            count: 0,
+        }
+    }
+}
+
 fn worth_cancelling(length: usize, count: usize) -> bool {
     let required = if length < 20 { 10 } else { length / 2 };
     count.saturating_mul(2) >= length.saturating_add(required)
@@ -61,9 +79,9 @@ fn subtract<I: Iterator<Item = (usize, f64)> + Clone>(
 impl Model {
     pub fn sparsify_rows(&mut self, deadline: Instant, options: SparsificationSettings) -> usize {
         let m = self.rows.len();
-        let mut seen = vec![usize::MAX; m];
-        let mut ratios = vec![0.0; m];
-        let mut counts = vec![0usize; m];
+        // One record per row keeps the three scan fields on the same cache
+        // line; the scan touches them together for every column entry.
+        let mut scan = vec![Scan::default(); m];
         let mut candidates = Vec::new();
         // Bounds were explicit rows in the standalone pass. Include their
         // eventual packed entries when preserving its linear work allowance.
@@ -118,31 +136,32 @@ impl Model {
                     if i == reference || i >= m || !matches!(self.rows[i], RowDomain::Linear(_)) {
                         continue;
                     }
-                    if seen[i] != reference {
-                        seen[i] = reference;
-                        ratios[i] = 0.0;
-                        counts[i] = 0;
+                    let scan = &mut scan[i];
+                    if scan.seen != reference {
+                        scan.seen = reference;
+                        scan.ratio = 0.0;
+                        scan.count = 0;
                         candidates.push(i);
                     }
                     let ratio = other / value;
                     if !ratio.is_finite() {
                         continue;
                     }
-                    if counts[i] == 0 {
-                        ratios[i] = if ratio.abs() > minimum_ratio && ratio.abs() < 1e4 {
+                    if scan.count == 0 {
+                        scan.ratio = if ratio.abs() > minimum_ratio && ratio.abs() < 1e4 {
                             ratio
                         } else {
                             0.0
                         };
-                        counts[i] = 1;
+                        scan.count = 1;
                     } else if ratio.abs() <= minimum_ratio {
-                        ratios[i] = 0.0;
-                        counts[i] = 0;
-                    } else if (ratio - ratios[i]).abs() < 1e-10 {
-                        counts[i] += 1;
-                    } else if ratio.abs() < ratios[i].abs() {
-                        ratios[i] = ratio;
-                        counts[i] = 1;
+                        scan.ratio = 0.0;
+                        scan.count = 0;
+                    } else if (ratio - scan.ratio).abs() < 1e-10 {
+                        scan.count += 1;
+                    } else if ratio.abs() < scan.ratio.abs() {
+                        scan.ratio = ratio;
+                        scan.count = 1;
                     }
                 }
             }
@@ -150,7 +169,7 @@ impl Model {
             let mut targets = Vec::new();
             let mut saving = 0isize;
             for &i in &candidates {
-                if !worth_cancelling(length, counts[i]) {
+                if !worth_cancelling(length, scan[i].count) {
                     continue;
                 }
                 let cost = 3usize.saturating_mul(base.len() + self.a.row(i).len() + 1);
@@ -158,7 +177,7 @@ impl Model {
                     continue;
                 }
                 work += cost;
-                let alpha = ratios[i];
+                let alpha = scan[i].ratio;
                 let Some(mut row) = subtract(base.iter(), self.a.row(i).iter(), alpha) else {
                     continue;
                 };

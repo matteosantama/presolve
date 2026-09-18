@@ -71,11 +71,18 @@ fn fingerprint<I: ExactSizeIterator<Item = (usize, f64)> + Clone>(mut entries: I
     entries.fold((collapse(support), collapse(coefficients)), scalar)
 }
 
+/// One word keeps the lexicographic (support, coefficients) order while the
+/// candidate sort compares and moves smaller keys.
+#[inline]
+fn packed((support, coefficients): (u32, u32)) -> u64 {
+    (u64::from(support) << 32) | u64::from(coefficients)
+}
+
 /// Returns A_base / A_other, plus whether equality is exact in floating-point
 /// arithmetic. The latter is required before two inequalities become equality.
-fn proportional(
-    base: crate::matrix::linked::View<'_>,
-    other: crate::matrix::linked::View<'_>,
+fn proportional<const AXIS: usize>(
+    base: crate::matrix::linked::View<'_, AXIS>,
+    other: crate::matrix::linked::View<'_, AXIS>,
     tolerance: f64,
 ) -> Option<(f64, bool)> {
     if base.is_empty() || base.len() != other.len() {
@@ -99,17 +106,34 @@ fn proportional(
     Some((ratio, exact))
 }
 
-fn candidate_groups<K: Ord + Send>(
+/// Packed constraint fingerprint plus the packed Hessian column fingerprint
+/// when present. The support hash occupies the high word, so sorting by this
+/// key keeps every column with the same support hash contiguous.
+pub(super) type ColumnKey = (u64, Option<u64>);
+
+/// The support hash of a packed fingerprint.
+pub(super) fn support_hash(key: u64) -> u32 {
+    (key >> 32) as u32
+}
+
+/// Candidates sorted by `(key, index)`. `prefix` gives the leading packed
+/// word of the key, which orders like `Ord` and drives the radix passes.
+fn sorted_candidates<K: Ord + Copy + Send>(
     count: usize,
     nonzeros: usize,
     executor: &Executor,
     key: impl Fn(usize) -> Option<K> + Sync,
-) -> Vec<Vec<usize>> {
+    prefix: impl Fn(&K) -> u64,
+) -> Vec<(K, usize)> {
     let enough_work = count >= MIN_PARALLEL_ITEMS && nonzeros >= MIN_PARALLEL_NONZEROS;
     let entry = |i| key(i).map(|key| (key, i));
     // The index is a unique tiebreaker, making group and member order identical
     // regardless of worker scheduling or sorting algorithm.
-    let entries = executor.filter_map_sorted(count, enough_work, entry);
+    executor.filter_map_sorted(count, enough_work, entry, |(key, _)| prefix(key))
+}
+
+/// Runs of equal keys with at least two members, in sorted order.
+fn groups_from<K: PartialEq>(entries: &[(K, usize)]) -> Vec<Vec<usize>> {
     let mut out = Vec::new();
     let mut start = 0;
     while start < entries.len() {
@@ -125,12 +149,28 @@ fn candidate_groups<K: Ord + Send>(
     out
 }
 
+fn candidate_groups<K: Ord + Copy + Send>(
+    count: usize,
+    nonzeros: usize,
+    executor: &Executor,
+    key: impl Fn(usize) -> Option<K> + Sync,
+    prefix: impl Fn(&K) -> u64,
+) -> Vec<Vec<usize>> {
+    groups_from(&sorted_candidates(count, nonzeros, executor, key, prefix))
+}
+
 impl Model {
     pub fn parallel_rows(&mut self, executor: &Executor) -> Result<usize, Certificate> {
-        let groups = candidate_groups(self.rows.len(), self.a.nnz(), executor, |i| {
-            (matches!(self.rows[i], RowDomain::Linear(_)) && self.a.row(i).len() > 1)
-                .then(|| fingerprint(self.a.row(i).iter()))
-        });
+        let groups = candidate_groups(
+            self.rows.len(),
+            self.a.nnz(),
+            executor,
+            |i| {
+                (matches!(self.rows[i], RowDomain::Linear(_)) && self.a.row(i).len() > 1)
+                    .then(|| packed(fingerprint(self.a.row(i).iter())))
+            },
+            |&hash| hash,
+        );
         let mut comparisons = 0;
         let mut unmatched = Vec::new();
         for group in groups {
@@ -248,7 +288,7 @@ impl Model {
     }
 
     pub fn parallel_columns(&mut self, executor: &Executor) -> Result<usize, Certificate> {
-        let groups = candidate_groups(
+        let entries: Vec<(ColumnKey, usize)> = sorted_candidates(
             self.bounds.len(),
             self.a.nnz().saturating_add(self.objective.p.nnz()),
             executor,
@@ -256,12 +296,14 @@ impl Model {
                 (self.alive[j] && !self.a.column(j).is_empty()).then(|| {
                     let p = self.objective.p.column(j);
                     (
-                        fingerprint(self.a.column(j).iter()),
-                        (!p.is_empty()).then(|| fingerprint(p.iter().copied())),
+                        packed(fingerprint(self.a.column(j).iter())),
+                        (!p.is_empty()).then(|| packed(fingerprint(p.iter().copied()))),
                     )
                 })
             },
+            |&(hash, _)| hash,
         );
+        let groups = groups_from(&entries);
         let mut comparisons = 0;
         for group in groups {
             for (at, &j) in group.iter().enumerate() {
@@ -319,6 +361,9 @@ impl Model {
                     }
                 }
             }
+        }
+        if self.rules.dominated_columns {
+            comparisons += self.dominated_support_groups(&entries)?;
         }
         Ok(comparisons)
     }
@@ -452,13 +497,16 @@ mod tests {
                         matrix.set(i, j, (1 + i + 7 * j) as f64);
                     }
                 }
-                for view in (0..rows)
-                    .map(|i| matrix.row(i))
-                    .chain((0..cols).map(|j| matrix.column(j)))
-                {
+                fn check<const AXIS: usize>(view: crate::matrix::linked::View<'_, AXIS>) {
                     let expected = scalar_fingerprint(view.iter());
                     assert_eq!(fingerprint(view.iter()), expected);
                     assert_eq!(fingerprint(view.to_vec().iter().copied()), expected);
+                }
+                for i in 0..rows {
+                    check(matrix.row(i));
+                }
+                for j in 0..cols {
+                    check(matrix.column(j));
                 }
             }
         }
@@ -467,20 +515,33 @@ mod tests {
     #[test]
     fn discovery_uses_requested_threads_and_preserves_filtered_group_order() {
         let key = |i: usize| (!i.is_multiple_of(5)).then_some(i % 17);
+        let prefix = |&k: &usize| k as u64;
         let executor = Executor::new(3).unwrap();
-        let serial = candidate_groups(2048, MIN_PARALLEL_NONZEROS, &Executor::Serial, key);
-        let parallel = candidate_groups(2048, MIN_PARALLEL_NONZEROS, &executor, |i| {
-            assert_eq!(rayon::current_num_threads(), 3);
-            key(i)
-        });
+        let serial = candidate_groups(2048, MIN_PARALLEL_NONZEROS, &Executor::Serial, key, prefix);
+        let parallel = candidate_groups(
+            2048,
+            MIN_PARALLEL_NONZEROS,
+            &executor,
+            |i| {
+                assert_eq!(rayon::current_num_threads(), 3);
+                key(i)
+            },
+            prefix,
+        );
         assert_eq!(serial, parallel);
 
         // Both the slot and work thresholds must be met before using a pool.
         for (count, work) in [(1023, MIN_PARALLEL_NONZEROS), (2048, 32767)] {
-            candidate_groups(count, work, &executor, |i| {
-                assert!(rayon::current_thread_index().is_none());
-                key(i)
-            });
+            candidate_groups(
+                count,
+                work,
+                &executor,
+                |i| {
+                    assert!(rayon::current_thread_index().is_none());
+                    key(i)
+                },
+                prefix,
+            );
         }
     }
 }

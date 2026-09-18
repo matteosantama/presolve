@@ -5,8 +5,9 @@ The library simplifies a problem before it reaches a solver, then maps solutions
 and certificates back to the original variables and constraints.
 
 This README catalogs the implemented rules, their applicability, and how they
-interact. Fourteen of the fifteen rule families are enabled by default; the bounded
-equality-dependency pass is enabled by the aggressive preset.
+interact. Fifteen of the eighteen rule families are enabled by default; the bounded
+equality-dependency pass, dual propagation, and dominated columns are enabled by
+the aggressive preset.
 
 ## Problem model and terminology
 
@@ -49,17 +50,20 @@ from fixing a variable themselves.
 | --- | --- | --- |
 | Local cleanup | `fixed_variables` | Substitute a variable whose bounds agree. |
 | Local cleanup | `empty_columns` | Optimize and remove an independent variable. |
+| Local cleanup | `quadratic_elimination` | Minimize a free, row-less variable with curvature out of the objective. |
 | Local cleanup | `empty_rows` | Delete a satisfied constant linear row or detect infeasibility. |
 | Local cleanup | `singleton_rows` | Convert a one-variable linear row to variable bounds. |
 | Bounds and optimality | `bound_propagation` | Derive bounds, remove redundant row sides, and detect contradictions. |
 | Bounds and optimality | `redundant_bounds` | Remove variable-bound sides implied by retained rows. |
 | Bounds and optimality | `dual_fixing` | Use objective derivatives and unlocked directions to eliminate variables. |
+| Bounds and optimality | `dual_propagation` | Prove strict multiplier signs from the dual constraints, then make rows tight and bounds active. |
 | Substitution | `singleton_columns` | Eliminate a variable occurring in one linear row. |
 | Substitution | `doubleton_equalities` | Eliminate one variable from a two-variable equality. |
 | Substitution | `short_equalities` | Substitute from equalities under configurable candidate and fill limits. |
 | Redundancy | `equality_dependencies` | Remove exact linear combinations of equalities using a bounded scratch basis. |
 | Parallel structure | `parallel_rows` | Merge proportional linear constraints. |
 | Parallel structure | `parallel_columns` | Aggregate interchangeable variables or exploit objective dominance. |
+| Parallel structure | `dominated_columns` | Fix a linear column whose weight can always shift onto another column. |
 | Matrix sparsity | `sparsification` | Cancel shared coefficients between linear rows. |
 | Cone geometry | `cones` | Simplify constant blocks and recognized structural cone patterns. |
 
@@ -80,8 +84,24 @@ For its scalar objective `½ p x² + c x`, the rule chooses `-c/p` clipped to th
 bounds when `p > 0`. With `p = 0`, it chooses the lower bound for `c > 0`, the
 upper bound for `c < 0`, or zero clipped to the bounds for `c = 0`. A finite
 choice is substituted and removed. A linear objective with an infinite improving
-side produces a recession ray. Variables coupled through `P` are retained.
+side produces a recession ray. Variables coupled through `P` are retained
+unless the next rule applies.
 Source: [variables.rs](src/core/rules/variables.rs).
+
+**Quadratic elimination — `quadratic_elimination`.** A free variable absent
+from all rows but coupled through `P` with `pⱼⱼ > 0` has the closed-form
+minimizer `xⱼ = -(cⱼ + Σₖ pⱼₖ xₖ)/pⱼⱼ`. Substituting this affine expression is
+the Schur complement `P′ = P₋ⱼ - pⱼpⱼᵀ/pⱼⱼ`, `c′ = c₋ⱼ - cⱼpⱼ/pⱼⱼ`, and
+`c₀′ = c₀ - cⱼ²/(2pⱼⱼ)`, applied through the same objective update as the
+equality substitutions and subject to `substitution_fill`; net Hessian growth
+is never permitted, since a chain of such eliminations is a dense
+factorization. For example, minimizing `½(x² + 2xy + 3y²) + x` over
+free `x` gives `x = -(1 + y)` and the reduced objective `y² - y - ½`. Postsolve
+evaluates the expression and sets the reduced cost to zero; the eliminated
+column's stationarity holds by construction. A bounded coupled variable is
+retained, since its clipped minimizer is not affine. The rule visits only the
+columns the empty-column queue already delivers.
+Source: [variables.rs](src/core/rules/variables.rs), [model.rs](src/core/model.rs).
 
 **Empty rows — `empty_rows`.** A linear row with no coefficients reduces to
 `l ≤ 0 ≤ u`. The rule deletes it if satisfied within the feasibility tolerance,
@@ -146,6 +166,45 @@ toward it. This switch controls two passes:
 For example, minimizing `x` with `x ≥ 0` and only upper-sided constraints having
 positive coefficients of `x` permits fixing `x = 0`.
 Source: [dual_fixing.rs](src/core/rules/dual_fixing.rs).
+
+**Dual propagation — `dual_propagation`.** Locks only use the structure of a
+column. This rule also uses magnitudes: it propagates the dual constraints
+`Σᵢ aᵢⱼ yᵢ + zⱼ = cⱼ` over the multiplier signs the row sides allow, exactly as
+bound propagation treats the primal rows. A column absent from `P` and from
+every conic row contributes one dual row: `Σᵢ aᵢⱼ yᵢ = cⱼ` for a free
+variable, `≤ cⱼ` with only a lower bound, and `≥ cⱼ` with only an upper bound.
+The pass runs once, after redundant variable bounds have been removed, so an
+implied-free column already supplies a dual equality. Propagation runs in
+rounds under `dual_propagation.work_limit` and records, for every multiplier
+bound it derives, which dual row produced it.
+
+A multiplier proved strictly signed, or a reduced cost proved strictly
+signed, is only a candidate. Each derived bound is a conic combination of dual
+rows, and that combination is a primal direction `d` supported on linear
+columns: the rule accumulates it from the proof records and verifies it on the
+current model, exactly in floating point. `d` must move every variable away
+from its finite bounds, keep every row activity on its allowed side with an
+exact zero on equalities and ranged rows, and satisfy `cᵀd ≤ 0`. A direction
+that also drives a variable onto its bound lets any feasible point slide there
+without leaving the feasible set or increasing the objective, so the variable
+is fixed; one that drives a row activity onto a side restricts the row to that
+side. Both are the same shift argument dual fixing and dominated columns use,
+so no optimal solution has to exist: feasibility, the infimum, and
+unboundedness are all preserved, and recovered multipliers keep the original
+signs without a postsolve record. A verified direction that reaches nothing is
+an improving recession direction and is returned as an unboundedness
+certificate. A conclusion whose direction fails the exact test is skipped.
+
+For example, with a free `x` costing `-1` in the single row `x - y ≤ 0`, the
+dual equality `y₀ = -1` proposes making the row tight; its direction is the
+unit step along `x`, which increases the row activity and lowers the objective,
+so the row becomes an equality. The rule is enabled by `Settings::aggressive`
+and off by default: in the Netlib and Maros–Mészáros comparison it removed
+1481 variables and 474 rows (MAROS-R7 860 columns, 80BAU3B 377 columns and 300
+rows) but its single pass added about 6% to the corpus presolve time, mostly
+on problems where it proves nothing. See
+`benchmark/results/new-rules-20260917/REPORT.md`.
+Source: [dual_propagation.rs](src/core/rules/dual_propagation.rs).
 
 ### Substitution
 
@@ -263,6 +322,34 @@ they pass the initial candidate comparison. Postsolve splits an aggregate value
 back into variables satisfying their original bounds.
 Source: [parallel.rs](src/core/rules/parallel.rs).
 
+**Dominated columns — `dominated_columns`.** Column `j` dominates column `k`
+when `cⱼ ≤ cₖ` and every row allows moving weight from `k` to `j`: the
+difference `aᵢⱼ - aᵢₖ` is zero in an equality or ranged row, nonpositive in an
+upper-sided row, and nonnegative in a lower-sided row. Both columns must be
+absent from `P` and from conic rows. Moving along `(Δxⱼ, Δxₖ) = (δ, -δ)` then
+keeps every row feasible without increasing the objective, so a feasible point
+can slide until one variable meets a bound. If `xⱼ` has no upper bound, or
+rows already imply it, `xₖ` is fixed at its finite lower bound; symmetrically
+`xⱼ` is fixed at its upper bound when `xₖ` is free below. Two infinite sides
+with different costs give a recession ray. For example, with `x + y ≥ 1`,
+`x, y ≥ 0`, and costs `1` and `2`, `x` dominates `y` and `y` is fixed at zero.
+The fixed variable's recovered reduced cost inherits the sign of the
+dominating column's, so no dual transformation is recorded.
+
+The search tests columns with identical constraint support, which the
+parallel-column scan already groups: each member of a support run is compared
+with up to 32 followers under `dominated_columns.work_limit`.
+`dominated_columns.general_search` additionally examines, for each column, the
+columns of its shortest row of at most 256 entries, which finds pairs with
+nested or overlapping supports at a cost proportional to the visits.
+
+The rule is enabled by `Settings::aggressive`, with the general search, and
+off by default: in the Netlib and Maros–Mészáros comparison the identical-
+support test removed 1638 variables (STANDATA, STANDGUB and QSTANDAT lose 324
+each, WOODW 242) but added about 2% to the corpus presolve time. See
+`benchmark/results/new-rules-20260917/REPORT.md`.
+Source: [dominated_columns.rs](src/core/rules/dominated_columns.rs).
+
 ### Matrix sparsity
 
 **Row sparsification — `sparsification`.** Search for substantial coefficient
@@ -322,12 +409,15 @@ thresholds below describe the default configuration:
    equalities, with cleanup between groups. Repeat fast phases while each reduces
    `nnz(A) + nnz(G) + nnz(P)` by more than 5%.
 3. **Medium exploration:** bound propagation, coupled dual fixing, short
-   equalities, parallel rows, and parallel columns, interleaved with cleanup.
+   equalities, parallel rows, and parallel columns with the dominated-column
+   test when enabled, interleaved with cleanup.
    Propagation permits up to three extra rounds subject to work and time limits.
    Start another fast/medium cycle only if the completed cycle reduced the same
    nonzero measure by more than 5%.
-4. **Final passes:** row sparsification and its follow-up cleanup, then redundant
-   variable-bound removal, provided the run has not reported a time limit.
+4. **Final passes:** row sparsification and its follow-up cleanup, redundant
+   variable-bound removal, then, when enabled, one dual propagation pass whose
+   conclusions are drained by cleanup and the substitution rules, provided the
+   run has not reported a time limit.
 
 The progress threshold and bounded searches mean presolve need not exhaust every
 possible reduction. For this measure, Hessian off-diagonal entries count twice. `Progress::AnyChange`
@@ -353,6 +443,9 @@ time budget can still prevent further reductions.
 | `propagation.minimum_gain_factor` | `1e4` | Absolute threshold multiplier applied to `numerics.feasibility`. |
 | `propagation.additional_rounds` | `3` | Extra propagation rounds after the initial pass; `usize::MAX` removes the cap. |
 | `propagation.work_limit` | `Default` | Work allowance across extra rounds; default is `max(constraint nonzeros / 4, 256)`. |
+| `dual_propagation.work_limit` | `Default` | Column visits in the dual propagation pass; default is four times the constraint nonzeros. |
+| `dominated_columns.general_search` | `false` | Also search from each column's shortest row; the aggressive preset enables it. |
+| `dominated_columns.work_limit` | `Default` | Candidate visits and merge steps per dominated-column scan; default is twice the constraint nonzeros. |
 | `progress` | `Nonzeros { minimum_reduction: 0.05 }` | Fractional nonzero decrease required to continue, or `AnyChange` to continue after any edit. |
 | `sparsification.allow_auxiliary_variables` | `true` | Allow inequality references that introduce activity variables; `false` uses equality references only. |
 | `sparsification.work_limit` | `Default` | Work allowance per pass; default is `max(8 * (constraint nonzeros + bound entries), 1024)`. |
@@ -403,7 +496,8 @@ let settings = Settings::aggressive(Duration::from_secs(2));
 This enables unrestricted substitution fill and Hessian growth, admits bounded
 and quadratic equality pivots, continues after any model edit, and removes the
 extra propagation round and work caps. It enables bounded exact equality
-dependency checks and lowers the relative propagation gain threshold to 0.005.
+dependency checks, dual propagation, the general dominated-column search, and
+lowers the relative propagation gain threshold to 0.005.
 It uses equality-only sparsification and keeps the default numerical tolerances
 and one-thread execution.
 

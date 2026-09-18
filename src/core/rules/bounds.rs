@@ -138,7 +138,7 @@ impl Model {
                     && (self.bounds[j].lower.is_finite() || self.bounds[j].upper.is_finite())
             })
             .collect();
-        columns.sort_unstable_by_key(|&j| (self.a.column(j).len(), j));
+        self.a.sort_columns_by_length(&mut columns);
         let mut lower_candidates = Vec::new();
         for j in columns {
             let b = self.bounds[j];
@@ -160,7 +160,18 @@ impl Model {
     }
 
     fn remove_redundant_bound(&mut self, j: usize, side: Side) {
+        if self.bound_implied(j, side) {
+            self.relax_bound(j, side);
+        }
+    }
+
+    /// Whether one retained linear row and the other variables' current
+    /// bounds already enforce this finite side of column `j`.
+    pub(super) fn bound_implied(&mut self, j: usize, side: Side) -> bool {
         let b = self.bounds[j];
+        if !side.value(b).is_finite() {
+            return false;
+        }
         let mut cursor = self.a.column(j).cursor();
         while let Some((i, a)) = cursor.next(&self.a) {
             let RowDomain::Linear(row) = self.rows[i] else {
@@ -193,10 +204,10 @@ impl Model {
                 Side::Upper => bound <= b.upper,
             };
             if implied {
-                self.relax_bound(j, side);
-                break;
+                return true;
             }
         }
+        false
     }
 
     pub(super) fn implied_bound(
@@ -204,7 +215,7 @@ impl Model {
         j: usize,
         side: Side,
         value: f64,
-        proof: impl FnOnce(&Self) -> Arc<Equation>,
+        proof: impl FnOnce(&mut Self) -> Arc<Equation>,
         propagation: bool,
     ) -> Result<bool, Certificate> {
         if !value.is_finite() || (propagation && value.abs() >= self.numerics.huge_bound) {

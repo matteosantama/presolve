@@ -7,7 +7,9 @@
 mod bounds;
 mod cones;
 mod dependencies;
+pub(crate) mod dominated_columns;
 mod dual_fixing;
+pub(crate) mod dual_propagation;
 mod parallel;
 mod rows;
 mod sparsification;

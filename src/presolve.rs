@@ -109,6 +109,8 @@ fn presolve_owned(
         valid_gain(settings.propagation.minimum_relative_gain, 0.01);
     model.propagation.minimum_gain_factor =
         valid_gain(settings.propagation.minimum_gain_factor, 1e4);
+    model.dual_propagation = settings.dual_propagation;
+    model.dominated_columns = settings.dominated_columns;
     model.equalities = settings.equalities;
     model.dependencies = settings.dependencies;
     model.allow_hessian_growth = settings.allow_hessian_growth;

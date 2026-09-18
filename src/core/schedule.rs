@@ -42,7 +42,7 @@ impl Model {
                 self.simplify_cones()?;
             }
             if self.rules.empty_columns {
-                self.empty_columns()?;
+                self.empty_columns(self.fill)?;
             }
             if self.rules.dual_fixing {
                 self.simple_dual_fix()?;
@@ -64,13 +64,8 @@ impl Model {
     }
 
     pub fn run(&mut self, limits: Limits, executor: &Executor) -> Result<Stats, Certificate> {
+        self.fill = limits.fill;
         let result = self.run_phases(limits, executor);
-        if result
-            .as_ref()
-            .is_ok_and(|stats| !stats.time_limit && self.rules.redundant_bounds)
-        {
-            self.remove_redundant_bounds();
-        }
         result.map_err(|mut certificate| {
             // The tape uses stable model indices, including when a
             // certificate ends exploration before final matrix packing.
@@ -134,6 +129,9 @@ impl Model {
                 if self.rules.parallel_columns {
                     stats.parallel_comparisons += self.parallel_columns(executor)?;
                 }
+                if self.rules.dominated_columns && self.dominated_columns.general_search {
+                    self.dominated_columns()?;
+                }
                 self.cleanup()?;
                 let after = self.work_size();
                 if !significant_progress(
@@ -173,6 +171,23 @@ impl Model {
             let deadline = start + limits.time;
             if self.sparsify_rows(deadline, limits.sparsification) > 0 {
                 self.sparsify_cleanup(limits, deadline)?;
+            }
+            stats.time_limit = Instant::now() >= deadline;
+        }
+        if !stats.time_limit && self.rules.redundant_bounds {
+            self.remove_redundant_bounds();
+        }
+        // Dual propagation runs once, on the final model: implied-free columns
+        // are exposed only now, and one pass here finds what repeated passes
+        // in the medium phases would, without their per-phase sweeps.
+        if !stats.time_limit && self.rules.dual_propagation {
+            let deadline = start + limits.time;
+            if self.dual_propagation()? > 0 {
+                // Drain the direct consequences only: new equalities feed the
+                // substitution rules and fixed columns feed cleanup. A further
+                // propagation round or bound sweep would cost more than the
+                // few extra reductions it finds here.
+                self.substitution_cleanup(limits, deadline)?;
             }
             stats.time_limit = Instant::now() >= deadline;
         }
@@ -230,6 +245,32 @@ impl Model {
             if self.rules.bound_propagation {
                 self.propagate_bounds()?;
             }
+            if self.rules.singleton_columns {
+                self.singleton_columns(limits.fill);
+            }
+            if self.rules.doubleton_equalities {
+                self.doubleton_equalities(limits.fill);
+            }
+            if self.rules.short_equalities {
+                self.short_equalities(limits.fill, deadline);
+            }
+            self.cleanup()?;
+            if self.revision == before {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Cleanup and substitution only, without propagation rounds.
+    fn substitution_cleanup(
+        &mut self,
+        limits: Limits,
+        deadline: Instant,
+    ) -> Result<(), Certificate> {
+        while Instant::now() < deadline {
+            let before = self.revision;
+            self.cleanup()?;
             if self.rules.singleton_columns {
                 self.singleton_columns(limits.fill);
             }

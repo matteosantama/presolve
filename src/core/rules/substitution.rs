@@ -180,8 +180,8 @@ impl Model {
     pub fn singleton_columns(&mut self, max_fill: usize) {
         // A neighbour's bound may make this column implied free without
         // changing its own degree. Inspect each affected row once per round.
-        for i in self.queues.singleton_activity_rows.take_round() {
-            if self.rows[i] == RowDomain::Deleted {
+        for i in self.queues.changed_activities.take_singleton_round() {
+            if self.rows[i] == RowDomain::Deleted || self.a.row_singletons(i) == 0 {
                 continue;
             }
             for (j, _) in self.a.row(i) {

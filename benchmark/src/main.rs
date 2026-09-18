@@ -87,6 +87,9 @@ struct Tuning {
     propagation_gain_factor: Option<f64>,
     #[arg(long, value_enum)]
     sparsification: Option<SparsificationMode>,
+    /// Disable these rule families on top of the preset (comma separated).
+    #[arg(long, value_delimiter = ',')]
+    without: Vec<String>,
 }
 
 impl Kind {

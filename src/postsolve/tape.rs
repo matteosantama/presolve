@@ -163,6 +163,14 @@ pub(crate) enum Rule {
         bounds: Bounds,
         rows: Vec<Equation>,
     },
+    /// A free column absent from every row was minimized out of a convex
+    /// quadratic objective: `x = offset + Σ slope_k x_k` is its stationarity
+    /// condition, so its reduced cost is zero and nothing else changes.
+    Eliminated {
+        column: usize,
+        offset: f64,
+        slopes: Entries,
+    },
 }
 
 /// Infeasibility proof or recession ray in stable working coordinates.
@@ -383,6 +391,20 @@ impl RecoveryTape {
                         point.z[*removed] = ratio * point.z[*keep];
                     }
                 }
+                Rule::Eliminated {
+                    column,
+                    offset,
+                    slopes,
+                } => {
+                    if mode.primal() {
+                        point.x[*column] = slopes
+                            .iter()
+                            .fold(mode.offset(*offset), |x, &(k, s)| x + s * point.x[k]);
+                    }
+                    if mode.dual() {
+                        point.z[*column] = 0.0;
+                    }
+                }
                 Rule::Unlocked {
                     column,
                     bounds,
@@ -523,6 +545,7 @@ impl RecoveryTape {
                         point.y[equation.row] = 0.0;
                     }
                 }
+                Rule::Eliminated { column, .. } => point.z[*column] = 0.0,
             }
         }
     }
