@@ -189,7 +189,8 @@ impl Model {
         // A neighbour's bound may make this column implied free without
         // changing its own degree. Inspect each affected row once per round.
         for i in self.queues.changed_activities.take_singleton_round() {
-            if self.rows[i] == RowDomain::Deleted || self.a.row_singletons(i) == 0 {
+            // A deleted row has no entries, so its singleton count is zero.
+            if self.a.row_singletons(i) == 0 {
                 continue;
             }
             for (j, _) in self.a.row(i) {

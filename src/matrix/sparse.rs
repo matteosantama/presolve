@@ -232,19 +232,21 @@ impl SymmetricMatrix {
     }
 
     /// Remove both symmetric views while keeping all other variable IDs stable.
-    pub fn remove_variable(&mut self, column: usize) -> Entries {
+    pub fn remove_variable(&mut self, column: usize) {
         self.revision += 1;
-        let entries = self.row(column).to_vec();
         let slot = std::mem::take(&mut self.slots[column]);
         self.dead += slot.capacity;
-        for &(row, _) in &entries {
+        // The released region is dead space that no other row's removal
+        // touches (a removal only shifts inside that row's own slot), so it
+        // can be read in place while the mirrored entries are cleared.
+        for at in slot.start..slot.start + slot.len {
+            let row = self.entries[at].0;
             if row != column {
                 self.set_entry(row, column, 0.0);
                 self.nnz -= 1;
             }
         }
-        self.nnz -= entries.len();
-        entries
+        self.nnz -= slot.len;
     }
 }
 
@@ -268,9 +270,11 @@ mod tests {
         let revision = p.revision;
         p.set(2, 0, 3.0);
         assert_eq!(p.revision, revision);
-        assert_eq!(p.remove_variable(2), [(0, 3.0), (1, 6.0)]);
+        assert_eq!(p.row(2), [(0, 3.0), (1, 6.0)]);
+        p.remove_variable(2);
         assert_eq!(p.nnz(), 2);
-        assert_eq!(p.remove_variable(0), [(0, 2.0)]);
+        assert_eq!(p.row(0), [(0, 2.0)]);
+        p.remove_variable(0);
         assert_eq!(p.nnz(), 1);
         assert_eq!(p.add_variable(), 3);
         p.set(0, 3, 7.0);

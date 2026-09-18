@@ -131,8 +131,9 @@ fn sorted_candidates<K: Ord + Copy + Send>(
     executor.filter_map_sorted(count, enough_work, entry, |(key, _)| prefix(key))
 }
 
-/// Runs of equal keys with at least two members, in sorted order.
-fn groups_from<K: PartialEq>(entries: &[(K, usize)]) -> Vec<Vec<usize>> {
+/// Runs of equal keys with at least two members, as index ranges into the
+/// sorted entries, in sorted order.
+fn runs<K: PartialEq>(entries: &[(K, usize)]) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut start = 0;
     while start < entries.len() {
@@ -141,13 +142,22 @@ fn groups_from<K: PartialEq>(entries: &[(K, usize)]) -> Vec<Vec<usize>> {
             end += 1;
         }
         if end - start > 1 {
-            out.push(entries[start..end].iter().map(|(_, i)| *i).collect());
+            out.push((start, end));
         }
         start = end;
     }
     out
 }
 
+#[cfg(test)]
+fn groups_from<K: PartialEq>(entries: &[(K, usize)]) -> Vec<Vec<usize>> {
+    runs(entries)
+        .into_iter()
+        .map(|(start, end)| entries[start..end].iter().map(|(_, i)| *i).collect())
+        .collect()
+}
+
+#[cfg(test)]
 fn candidate_groups<K: Ord + Copy + Send>(
     count: usize,
     nonzeros: usize,
@@ -160,7 +170,7 @@ fn candidate_groups<K: Ord + Copy + Send>(
 
 impl Model {
     pub fn parallel_rows(&mut self, executor: &Executor) -> Result<usize, Certificate> {
-        let groups = candidate_groups(
+        let entries = sorted_candidates(
             self.rows.len(),
             self.a.nnz(),
             executor,
@@ -172,11 +182,12 @@ impl Model {
         );
         let mut comparisons = 0;
         let mut unmatched = Vec::new();
-        for group in groups {
-            let base = group[0];
+        for (start, end) in runs(&entries) {
+            let group = &entries[start..end];
+            let base = group[0].1;
             unmatched.clear();
             // Preserve the usual linear-time path and its representative order.
-            for &other in &group[1..] {
+            for &(_, other) in &group[1..] {
                 comparisons += 1;
                 if !self.merge_parallel_rows(base, other)? {
                     unmatched.push((other, 0.0));
@@ -299,14 +310,14 @@ impl Model {
             },
             |&(hash, _)| hash,
         );
-        let groups = groups_from(&entries);
         let mut comparisons = 0;
-        for group in groups {
-            for (at, &j) in group.iter().enumerate() {
+        for (start, end) in runs(&entries) {
+            let group = &entries[start..end];
+            for (at, &(_, j)) in group.iter().enumerate() {
                 if !self.alive[j] {
                     continue;
                 }
-                for &k in &group[at + 1..] {
+                for &(_, k) in &group[at + 1..] {
                     if !self.alive[k] {
                         continue;
                     }

@@ -32,6 +32,9 @@ impl Model {
 
     pub fn singleton_rows(&mut self) -> Result<(), Certificate> {
         while let Some(i) = self.queues.singleton_rows.pop() {
+            if self.a.row(i).len() != 1 {
+                continue;
+            }
             let Some(equation) = self.equation(i) else {
                 continue;
             };

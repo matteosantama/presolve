@@ -19,15 +19,15 @@ fn packed_sides(bounds: Bounds) -> usize {
 /// Per-row state of one reference row's candidate scan.
 #[derive(Clone, Copy)]
 struct Scan {
-    seen: usize,
+    seen: u32,
+    count: u32,
     ratio: f64,
-    count: usize,
 }
 
 impl Default for Scan {
     fn default() -> Self {
         Self {
-            seen: usize::MAX,
+            seen: u32::MAX,
             ratio: 0.0,
             count: 0,
         }
@@ -81,8 +81,10 @@ impl Model {
         let options = self.settings.sparsification;
         let m = self.rows.len();
         // One record per row keeps the three scan fields on the same cache
-        // line; the scan touches them together for every column entry.
-        let mut scan = vec![Scan::default(); m];
+        // line; the scan touches them together for every column entry. Most
+        // problems have no reference row at all, so the table is allocated
+        // on the first one.
+        let mut scan: Vec<Scan> = Vec::new();
         let mut candidates = Vec::new();
         // Bounds were explicit rows in the standalone pass. Include their
         // eventual packed entries when preserving its linear work allowance.
@@ -126,6 +128,10 @@ impl Model {
                 continue;
             }
             let minimum_ratio = (1e-10 / minimum).max(1e-6);
+            if scan.is_empty() {
+                scan = vec![Scan::default(); m];
+            }
+            let seen = reference as u32;
             candidates.clear();
             'scan: for (j, value) in base {
                 work += 1;
@@ -138,8 +144,8 @@ impl Model {
                         continue;
                     }
                     let scan = &mut scan[i];
-                    if scan.seen != reference {
-                        scan.seen = reference;
+                    if scan.seen != seen {
+                        scan.seen = seen;
                         scan.ratio = 0.0;
                         scan.count = 0;
                         candidates.push(i);
@@ -170,7 +176,7 @@ impl Model {
             let mut targets = Vec::new();
             let mut saving = 0isize;
             for &i in &candidates {
-                if !worth_cancelling(length, scan[i].count) {
+                if !worth_cancelling(length, scan[i].count as usize) {
                     continue;
                 }
                 let cost = 3usize.saturating_mul(base.len() + self.a.row(i).len() + 1);

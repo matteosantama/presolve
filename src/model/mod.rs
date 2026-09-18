@@ -495,15 +495,16 @@ impl Model {
     /// No state changes if any transformed coefficient would be nonfinite.
     pub fn fix(&mut self, column: usize, value: f64) -> bool {
         assert!(self.alive[column]);
-        let Some(updates) = self
+        // `shifted` is pure, so check every row first and recompute while
+        // applying rather than collecting the domains.
+        if !self
             .a
             .column(column)
             .iter()
-            .map(|(i, a)| shifted(self.rows[i], a * value).map(|domain| (i, domain)))
-            .collect::<Option<Vec<_>>>()
-        else {
+            .all(|(i, a)| shifted(self.rows[i], a * value).is_some())
+        {
             return false;
-        };
+        }
         let Some(gradient) = self
             .objective
             .substitute(column, value, &[], 0, false, None)
@@ -516,8 +517,8 @@ impl Model {
         self.alive[column] = false;
         let bounds = self.bounds[column];
         let entries = self.a.remove_column(column);
-        for ((i, domain), &(row, a)) in updates.into_iter().zip(&entries) {
-            debug_assert_eq!(i, row);
+        for &(i, a) in &entries {
+            let domain = shifted(self.rows[i], a * value).expect("checked above");
             self.locks[column].remove(Locks::contribution(a, self.rows[i]));
             self.rows[i] = domain;
             // Keep the cached activity warm: the removed term is the column's
