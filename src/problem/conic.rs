@@ -228,12 +228,12 @@ impl Problem {
             CscMatrix::from_parts(outputs.len(), n, pointers, ri, values)
         } else {
             let crate::problem::Matrix::Linked {
-                matrix,
+                matrix: Some(matrix),
                 compact_to_stable_rows,
                 stable_to_compact_columns,
             } = &self.a
             else {
-                unreachable!()
+                unreachable!("working storage is returned before export")
             };
             pack_rows(outputs.len(), n, |i| {
                 let (row, bound, scale) = match outputs[i] {

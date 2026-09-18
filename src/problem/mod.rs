@@ -54,7 +54,7 @@ impl ConstraintMatrix {
         column: impl Fn(usize) -> I,
     ) -> Self {
         Self(Matrix::Linked {
-            matrix: LinkedMatrix::from_columns(rows, columns, column),
+            matrix: Some(LinkedMatrix::from_columns(rows, columns, column)),
             compact_to_stable_rows: (0..rows).collect(),
             stable_to_compact_columns: Arc::new((0..columns).collect()),
         })
@@ -77,15 +77,10 @@ pub struct Problem {
 }
 #[derive(Clone, Debug)]
 pub(crate) enum Matrix {
-    Vacant,
-    // Temporary state while already-editable input is owned by Model.
-    Moved {
-        compact_to_stable_rows: Vec<usize>,
-        stable_to_compact_columns: Arc<Vec<usize>>,
-    },
     Csc(CscMatrix),
     Linked {
-        matrix: LinkedMatrix,
+        /// `None` while the working model owns the storage; see `working_matrix`.
+        matrix: Option<LinkedMatrix>,
         // Compact row -> stable row, stable column -> compact column.
         compact_to_stable_rows: Vec<usize>,
         stable_to_compact_columns: Arc<Vec<usize>>,
@@ -181,12 +176,15 @@ impl Problem {
                 stable_to_compact_columns,
             } => (
                 None,
-                Some(matrix.row(compact_to_stable_rows[i]).iter()),
+                Some(
+                    matrix
+                        .as_ref()
+                        .expect("editable input belongs to the working model")
+                        .row(compact_to_stable_rows[i])
+                        .iter(),
+                ),
                 stable_to_compact_columns.as_slice(),
             ),
-            Matrix::Moved { .. } | Matrix::Vacant => {
-                unreachable!("editable input belongs to the working model")
-            }
         };
         csc.into_iter()
             .flat_map(move |a| {
@@ -215,9 +213,6 @@ impl Problem {
     pub fn into_csc(self) -> ProblemData {
         let n = self.variable_count();
         let a = match self.a {
-            Matrix::Moved { .. } | Matrix::Vacant => {
-                unreachable!("working storage is returned before export")
-            }
             Matrix::Csc(a) => a,
             Matrix::Linked {
                 matrix,
@@ -225,6 +220,8 @@ impl Problem {
                 stable_to_compact_columns,
             } => pack_rows(compact_to_stable_rows.len(), n, |i| {
                 matrix
+                    .as_ref()
+                    .expect("working storage is returned before export")
                     .row(compact_to_stable_rows[i])
                     .iter()
                     .map(|(j, v)| (stable_to_compact_columns[j], v))
@@ -252,57 +249,28 @@ impl Problem {
         }
     }
     pub(crate) fn restore_working_matrix(&mut self, matrix: LinkedMatrix) {
-        if matches!(self.a, Matrix::Moved { .. }) {
-            let Matrix::Moved {
-                compact_to_stable_rows,
-                stable_to_compact_columns,
-                ..
-            } = std::mem::replace(&mut self.a, Matrix::Vacant)
-            else {
-                unreachable!()
-            };
-            self.a = Matrix::Linked {
-                matrix,
-                compact_to_stable_rows,
-                stable_to_compact_columns,
-            };
+        if let Matrix::Linked {
+            matrix: slot @ None,
+            ..
+        } = &mut self.a
+        {
+            *slot = Some(matrix);
         }
     }
+    /// Editable storage for the working model. Input already in stable linked
+    /// form is lent out and returned by `restore_working_matrix`; anything else
+    /// is copied once.
     pub(crate) fn working_matrix(&mut self) -> LinkedMatrix {
-        let direct = match &self.a {
+        let (m, n) = (self.row_count(), self.variable_count());
+        let identity = |map: &[usize], len: usize| map.iter().copied().eq(0..len);
+        match &mut self.a {
             Matrix::Linked {
-                compact_to_stable_rows,
-                stable_to_compact_columns,
-                ..
-            } => {
-                compact_to_stable_rows
-                    .iter()
-                    .copied()
-                    .eq(0..self.row_count())
-                    && stable_to_compact_columns
-                        .iter()
-                        .copied()
-                        .eq(0..self.variable_count())
-            }
-            _ => false,
-        };
-        if direct {
-            let Matrix::Linked {
                 matrix,
                 compact_to_stable_rows,
                 stable_to_compact_columns,
-            } = std::mem::replace(&mut self.a, Matrix::Vacant)
-            else {
-                unreachable!()
-            };
-            self.a = Matrix::Moved {
-                compact_to_stable_rows,
-                stable_to_compact_columns,
-            };
-            return matrix;
-        }
-        match &self.a {
-            Matrix::Moved { .. } | Matrix::Vacant => unreachable!(),
+            } if identity(compact_to_stable_rows, m) && identity(stable_to_compact_columns, n) => {
+                matrix.take().expect("working storage is lent at most once")
+            }
             Matrix::Csc(a) => {
                 LinkedMatrix::from_columns(a.rows(), a.columns(), |j| a.as_ref().column(j))
             }
@@ -311,7 +279,10 @@ impl Problem {
                 compact_to_stable_rows,
                 stable_to_compact_columns,
             } => {
-                let a = pack_rows(compact_to_stable_rows.len(), self.variable_count(), |i| {
+                let matrix = matrix
+                    .as_ref()
+                    .expect("working storage is lent at most once");
+                let a = pack_rows(compact_to_stable_rows.len(), n, |i| {
                     matrix
                         .row(compact_to_stable_rows[i])
                         .iter()
