@@ -3,7 +3,7 @@
 use crate::{
     core::model::{Model, RowDomain},
     matrix::sparse::Entries,
-    postsolve::tape::{Certificate, Point, Recovery, Rule},
+    postsolve::tape::{Certificate, Rule},
 };
 use std::time::Instant;
 
@@ -154,7 +154,7 @@ impl Model {
                         .filter(|e| e.0 != i)
                         .map(|&(j, a)| (j, -a))
                         .collect();
-                    self.replace_row(i, &[], RowDomain::Deleted);
+                    self.clear_row(i);
                     self.postsolve.rules.push(Rule::DependentRow {
                         row: i,
                         coefficients,
@@ -171,14 +171,10 @@ impl Model {
                         })
                         .sum();
                     if rhs.abs() > self.numerics.feasibility * (1.0 + scale) {
-                        let mut point = Point::zeros(self.bounds.len(), self.rows.len());
-                        for &(j, a) in &proof {
-                            point.y[j] = rhs.signum() * a;
-                        }
-                        return Err(Certificate {
-                            mode: Recovery::PrimalInfeasibility,
-                            point,
-                        });
+                        return Err(self.primal_certificate(
+                            proof.iter().map(|&(j, a)| (j, rhs.signum() * a)),
+                            [],
+                        ));
                     }
                 }
             } else if basis.len() < options.max_basis_rows {

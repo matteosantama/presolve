@@ -7,8 +7,7 @@ use crate::{
     },
     matrix::quadratic::Quadratic,
     postsolve::{
-        Coordinates, Postsolve, PrimalCertificate, SolutionRef, original_point,
-        tape::{Point, Recovery},
+        Coordinates, Postsolve, PrimalCertificate, SolutionRef, original_point, tape::Recovery,
     },
     problem::{Bounds, Constraint, Matrix, Problem, row_indices},
     result::{Outcome, PresolveResult, ReducedProblem, Size, Stats, UnboundednessCertificate},
@@ -196,7 +195,7 @@ fn presolve_owned(
 /// Verify a cheap candidate only when a recession ray has been discovered.
 /// Failure to find a witness simply returns a reduced or unchanged problem.
 fn feasible_point(model: &Model) -> Option<Vec<f64>> {
-    let mut p = Point::zeros(model.bounds.len(), model.rows.len());
+    let mut p = model.point();
     for (j, b) in model.bounds.iter().enumerate() {
         if model.alive[j] {
             p.x[j] = 0.0_f64.max(b.lower).min(b.upper);

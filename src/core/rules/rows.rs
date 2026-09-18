@@ -4,7 +4,7 @@
 
 use crate::{
     core::model::{Model, RowDomain},
-    postsolve::tape::{Certificate, Point, Recovery, Side},
+    postsolve::tape::{Certificate, Side},
 };
 
 impl Model {
@@ -55,15 +55,11 @@ impl Model {
         Ok(())
     }
 
+    /// A single row separated from its side, with the matching bound multipliers.
     pub(super) fn row_certificate(&self, row: usize, multiplier: f64) -> Certificate {
-        let mut point = Point::zeros(self.bounds.len(), self.rows.len());
-        point.y[row] = multiplier;
-        for (j, a) in self.a.row(row) {
-            point.z[j] = -a * multiplier;
-        }
-        Certificate {
-            mode: Recovery::PrimalInfeasibility,
-            point,
-        }
+        self.primal_certificate(
+            [(row, multiplier)],
+            self.a.row(row).iter().map(|(j, a)| (j, -a * multiplier)),
+        )
     }
 }

@@ -10,7 +10,7 @@ use crate::{
         queues::Queues,
     },
     matrix::{linked::LinkedMatrix, sparse::Entries},
-    postsolve::tape::{Equation, RecoveryTape, Rule, Side},
+    postsolve::tape::{Certificate, Equation, Point, Recovery, RecoveryTape, Rule, Side},
     problem::Bounds,
 };
 use std::{sync::Arc, time::Instant};
@@ -92,6 +92,14 @@ fn stale() -> Activity {
             infinite: STALE,
         },
         max: Extreme::default(),
+    }
+}
+
+/// Shift a cached activity for a bound change of one of its terms, marking
+/// it stale when the incremental update would lose precision.
+fn shift_cached(activity: &mut Activity, a: f64, old: Bounds, new: Bounds) {
+    if activity.min.infinite != STALE && !activity.replace_bound(a, old, new) {
+        *activity = stale();
     }
 }
 
@@ -184,7 +192,7 @@ impl Model {
             model.changed_row(i);
         }
         for j in 0..n {
-            model.queues.column_changed(j, model.a.column(j).len());
+            model.column_changed(j);
             if model.bounds[j].equality() {
                 model.queues.fixed_columns.push(j);
             }
@@ -233,7 +241,7 @@ impl Model {
         }
         for j in self.a.replace_rows(matrix_updates) {
             if self.alive[j] {
-                self.queues.column_changed(j, self.a.column(j).len());
+                self.column_changed(j);
             }
         }
         // Domain changes also affect locks of coefficients that stayed equal.
@@ -330,7 +338,7 @@ impl Model {
         }
         for &(j, _) in &old {
             if self.alive[j] {
-                self.queues.column_changed(j, self.a.column(j).len());
+                self.column_changed(j);
             }
         }
         let mut next = 0;
@@ -343,7 +351,7 @@ impl Model {
                 continue;
             }
             if self.alive[j] {
-                self.queues.column_changed(j, self.a.column(j).len());
+                self.column_changed(j);
             }
         }
         self.row_scratch = old;
@@ -351,10 +359,60 @@ impl Model {
         self.revision += 1;
     }
 
-    pub fn delete_row(&mut self, row: usize) {
-        assert!(matches!(self.rows[row], RowDomain::Linear(_)));
+    /// Remove a row's coefficients and retire its domain, without a record;
+    /// the caller pushes the rule that explains the row's multiplier.
+    pub(super) fn clear_row(&mut self, row: usize) {
+        debug_assert!(self.rows[row] != RowDomain::Deleted);
         self.replace_row(row, &[], RowDomain::Deleted);
+    }
+
+    /// Delete a row whose multiplier is simply zeroed on recovery.
+    pub fn delete_row(&mut self, row: usize) {
+        self.clear_row(row);
         self.postsolve.rules.push(Rule::DeletedRow(row));
+    }
+
+    fn column_changed(&mut self, j: usize) {
+        self.queues.column_changed(j, self.a.column(j).len());
+    }
+
+    /// A zero point in working coordinates, for certificates and probes.
+    pub(crate) fn point(&self) -> Point {
+        Point::zeros(self.bounds.len(), self.rows.len())
+    }
+
+    /// Farkas certificate with multipliers `y` on rows and `z` on columns.
+    pub(super) fn primal_certificate(
+        &self,
+        y: impl IntoIterator<Item = (usize, f64)>,
+        z: impl IntoIterator<Item = (usize, f64)>,
+    ) -> Certificate {
+        let mut point = self.point();
+        for (i, v) in y {
+            point.y[i] = v;
+        }
+        for (j, v) in z {
+            point.z[j] = v;
+        }
+        Certificate {
+            mode: Recovery::PrimalInfeasibility,
+            point,
+        }
+    }
+
+    /// Recession direction with the given nonzero components.
+    pub(super) fn dual_certificate(
+        &self,
+        x: impl IntoIterator<Item = (usize, f64)>,
+    ) -> Certificate {
+        let mut point = self.point();
+        for (j, v) in x {
+            point.x[j] = v;
+        }
+        Certificate {
+            mode: Recovery::DualInfeasibility,
+            point,
+        }
     }
 
     fn set_bounds(&mut self, column: usize, bounds: Bounds) {
@@ -364,10 +422,7 @@ impl Model {
         }
         let require_free = self.equalities.require_free_variable;
         for (i, a) in self.a.column(column) {
-            let activity = &mut self.activities[i];
-            if activity.min.infinite != STALE && !activity.replace_bound(a, old, bounds) {
-                *activity = stale();
-            }
+            shift_cached(&mut self.activities[i], a, old, bounds);
             self.queues.changed_activities.push(i);
             // The kind byte decides the remaining queues, so the wider domain
             // is only read for a cone row's block.
@@ -384,8 +439,7 @@ impl Model {
                 _ => {}
             }
         }
-        self.queues
-            .column_changed(column, self.a.column(column).len());
+        self.column_changed(column);
         self.revision += 1;
     }
 
@@ -401,10 +455,7 @@ impl Model {
         }
         let old = std::mem::replace(&mut self.bounds[column], bounds);
         for (i, a) in self.a.column(column) {
-            let activity = &mut self.activities[i];
-            if activity.min.infinite != STALE && !activity.replace_bound(a, old, bounds) {
-                *activity = stale();
-            }
+            shift_cached(&mut self.activities[i], a, old, bounds);
         }
         self.revision += 1;
     }
@@ -458,7 +509,7 @@ impl Model {
             return false;
         };
         for &(j, _) in &gradient.terms {
-            self.queues.column_changed(j, self.a.column(j).len());
+            self.column_changed(j);
         }
         self.alive[column] = false;
         let bounds = self.bounds[column];
@@ -472,9 +523,7 @@ impl Model {
             // update a bound change makes. Rules that fix many columns of
             // shared long rows would otherwise recompute those rows each time.
             let mut kept = self.activities[i];
-            if kept.min.infinite != STALE && !kept.replace_bound(a, bounds, Bounds::fixed(0.0)) {
-                kept = stale();
-            }
+            shift_cached(&mut kept, a, bounds, Bounds::fixed(0.0));
             self.changed_row(i);
             self.activities[i] = kept;
         }
@@ -662,7 +711,7 @@ impl Model {
             }
         };
         for &(j, _) in gradient.terms.iter().chain(&slopes) {
-            self.queues.column_changed(j, self.a.column(j).len());
+            self.column_changed(j);
         }
         self.alive[column] = false;
         for (i, entries, domain) in updates {
@@ -810,7 +859,7 @@ impl Model {
             return false;
         }
         for &(k, _) in &slopes {
-            self.queues.column_changed(k, self.a.column(k).len());
+            self.column_changed(k);
         }
         self.alive[column] = false;
         self.postsolve.rules.push(Rule::Eliminated {
@@ -842,7 +891,7 @@ impl Model {
             .collect();
         self.alive[column] = false;
         for equation in &rows {
-            self.replace_row(equation.row, &[], RowDomain::Deleted);
+            self.clear_row(equation.row);
         }
         self.postsolve.rules.push(Rule::Unlocked {
             column,

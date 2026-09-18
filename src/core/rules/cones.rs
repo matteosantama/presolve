@@ -2,7 +2,7 @@
 use crate::problem::{Bounds, Cone};
 use crate::{
     core::model::{Model, RowDomain},
-    postsolve::tape::{Certificate, Point, Recovery, Rule},
+    postsolve::tape::{Certificate, Rule},
 };
 
 impl Model {
@@ -24,8 +24,7 @@ impl Model {
                 entries: self.a.row(i).to_vec(),
             });
         }
-        self.replace_row(i, &[], RowDomain::Deleted);
-        self.postsolve.rules.push(Rule::DeletedRow(i));
+        self.delete_row(i);
     }
     fn linear_cone_row(&mut self, i: usize, equality: bool) {
         let rhs = self.cone_rhs(i);
@@ -77,14 +76,8 @@ impl Model {
                         continue;
                     }
                     crate::problem::Membership::Outside(dual) => {
-                        let mut point = Point::zeros(self.bounds.len(), self.rows.len());
-                        for (&i, v) in rows.iter().zip(dual) {
-                            point.y[i] = -v;
-                        }
-                        return Err(Certificate {
-                            mode: Recovery::PrimalInfeasibility,
-                            point,
-                        });
+                        return Err(self
+                            .primal_certificate(rows.iter().zip(dual).map(|(&i, v)| (i, -v)), []));
                     }
                     crate::problem::Membership::Unknown => (),
                 }
@@ -100,15 +93,10 @@ impl Model {
                     if self.a.row(head).is_empty()
                         && self.cone_rhs(head) < -self.numerics.feasibility
                     {
-                        let mut point = Point::zeros(self.bounds.len(), self.rows.len());
-                        point.y[head] = -1.;
-                        return Err(Certificate {
-                            mode: Recovery::PrimalInfeasibility,
-                            point,
-                        });
+                        return Err(self.primal_certificate([(head, -1.)], []));
                     }
                     if self.zero_coordinate(head) {
-                        self.replace_row(head, &[], RowDomain::Deleted);
+                        self.clear_row(head);
                         for &i in &rows[1..] {
                             self.linear_cone_row(i, true);
                         }
@@ -213,7 +201,7 @@ impl Model {
                         for j in 0..order {
                             for i in 0..=j {
                                 if i == j {
-                                    self.replace_row(rows[k], &[], RowDomain::Deleted);
+                                    self.clear_row(rows[k]);
                                 } else {
                                     self.linear_cone_row(rows[k], true);
                                 }

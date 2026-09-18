@@ -2,11 +2,7 @@
 // Modified for this library; copyright and attribution notices are in NOTICE.
 //! Fix known variables and eliminate independent empty columns.
 
-use crate::{
-    core::model::Model,
-    postsolve::tape::{Certificate, Point, Recovery},
-    problem::Bounds,
-};
+use crate::{core::model::Model, postsolve::tape::Certificate, problem::Bounds};
 
 /// Beyond this Hessian degree the Schur complement is dense enough that the
 /// no-growth check rejects the elimination anyway.
@@ -65,11 +61,6 @@ impl Model {
     }
 
     pub(super) fn recession_certificate(&self, column: usize, direction: f64) -> Certificate {
-        let mut point = Point::zeros(self.bounds.len(), self.rows.len());
-        point.x[column] = direction;
-        Certificate {
-            mode: Recovery::DualInfeasibility,
-            point,
-        }
+        self.dual_certificate([(column, direction)])
     }
 }

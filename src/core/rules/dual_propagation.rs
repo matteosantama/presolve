@@ -14,7 +14,7 @@ use crate::{
         model::{Model, RowDomain},
         queues::Worklist,
     },
-    postsolve::tape::{Certificate, Point, Recovery, Side},
+    postsolve::tape::{Certificate, Side},
     problem::Bounds,
 };
 use std::collections::BTreeMap;
@@ -474,14 +474,11 @@ impl Model {
             // The direction never reaches the target, so it is a recession
             // direction; with negative cost it proves unboundedness.
             if cost < 0.0 {
-                let mut point = Point::zeros(n, m);
-                for &j in &scratch.lambda_touched {
-                    point.x[j] = -scratch.lambda[j];
-                }
-                return Err(Certificate {
-                    mode: Recovery::DualInfeasibility,
-                    point,
-                });
+                let ray = scratch
+                    .lambda_touched
+                    .iter()
+                    .map(|&j| (j, -scratch.lambda[j]));
+                return Err(self.dual_certificate(ray));
             }
             return Ok(false);
         }

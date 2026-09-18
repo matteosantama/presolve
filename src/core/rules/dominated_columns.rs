@@ -6,7 +6,7 @@
 
 use crate::{
     core::model::{Model, RowDomain},
-    postsolve::tape::{Certificate, Point, Recovery, Side},
+    postsolve::tape::{Certificate, Side},
     problem::Bounds,
 };
 
@@ -196,13 +196,7 @@ impl Model {
             if self.objective.c[dominant] == self.objective.c[dominated] {
                 return Ok(None);
             }
-            let mut point = Point::zeros(self.bounds.len(), self.rows.len());
-            point.x[dominant] = 1.0;
-            point.x[dominated] = -1.0;
-            return Err(Certificate {
-                mode: Recovery::DualInfeasibility,
-                point,
-            });
+            return Err(self.dual_certificate([(dominant, 1.0), (dominated, -1.0)]));
         };
         if self.fix(column, value) {
             scratch.fingerprints[column] = UNKNOWN_FINGERPRINT;

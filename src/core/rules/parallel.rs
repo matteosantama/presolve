@@ -8,7 +8,7 @@ use crate::{
         execution::Executor,
         model::{Model, RowDomain},
     },
-    postsolve::tape::{Certificate, Point, Recovery, Rule, Side},
+    postsolve::tape::{Certificate, Rule, Side},
     problem::Bounds,
 };
 use wide::{f64x4, u32x4};
@@ -261,13 +261,8 @@ impl Model {
             {
                 return Ok(false);
             }
-            let mut point = Point::zeros(self.bounds.len(), self.rows.len());
-            point.y[base] = if b.lower > upper { 1.0 } else { -1.0 };
-            point.y[other] = -ratio * point.y[base];
-            return Err(Certificate {
-                mode: Recovery::PrimalInfeasibility,
-                point,
-            });
+            let sign = if b.lower > upper { 1.0 } else { -1.0 };
+            return Err(self.primal_certificate([(base, sign), (other, -ratio * sign)], []));
         }
         if intersection.equality() && !b.equality() && !exact {
             return Ok(false);
@@ -278,7 +273,7 @@ impl Model {
         if intersection.upper < b.upper {
             self.tighten_row(base, other, ratio, Side::Upper, intersection.upper);
         }
-        self.replace_row(other, &[], RowDomain::Deleted);
+        self.clear_row(other);
         self.postsolve.rules.push(Rule::MergedRow {
             keep: base,
             removed: other,
@@ -346,13 +341,7 @@ impl Model {
                         self.bounds[k].lower
                     };
                     if !bj.is_finite() && !bk.is_finite() {
-                        let mut point = Point::zeros(self.bounds.len(), self.rows.len());
-                        point.x[j] = dj;
-                        point.x[k] = dk;
-                        return Err(Certificate {
-                            mode: Recovery::DualInfeasibility,
-                            point,
-                        });
+                        return Err(self.dual_certificate([(j, dj), (k, dk)]));
                     }
                     if !bj.is_finite() {
                         self.fix(k, bk);
