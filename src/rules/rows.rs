@@ -3,8 +3,8 @@
 //! Eliminate empty rows and turn singleton rows into variable bounds.
 
 use crate::{
-    core::model::{Model, RowDomain},
-    postsolve::tape::{Certificate, Side},
+    model::tape::{Certificate, Side},
+    model::{Model, RowDomain},
 };
 
 impl Model {

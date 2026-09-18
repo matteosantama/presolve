@@ -1,11 +1,10 @@
 //! Public solution recovery and mappings between original, working, and reduced coordinates.
 mod solution;
-pub(crate) mod tape;
 
 pub use solution::{CertificateRef, PrimalCertificate, Solution, SolutionMut, SolutionRef};
 
+use crate::model::tape::{Point, Recovery, RecoveryTape};
 use std::sync::Arc;
-use tape::{Point, Recovery, RecoveryTape};
 
 /// Working indices remain stable through rules; auxiliary variables are appended.
 /// These maps lift compact reduced coordinates into that working index space.

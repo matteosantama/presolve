@@ -1,9 +1,9 @@
 //! Bounded row cancellation on the native ranged model. Row/column storage,
 //! bound proofs, cleanup queues, and postsolve are shared with other rules.
 use crate::{
-    core::model::{Model, RowDomain, shifted},
     matrix::sparse::Entries,
-    postsolve::tape::Rule,
+    model::tape::Rule,
+    model::{Model, RowDomain, shifted},
     problem::Bounds,
 };
 use std::time::Instant;

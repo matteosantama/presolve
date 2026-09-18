@@ -4,7 +4,7 @@
 //! objective derivative is evaluated after recovering its primal value,
 //! supporting coupled quadratic objectives and sequences of substitutions.
 
-use crate::{core::objective::Gradient, matrix::sparse::Entries, problem::Bounds};
+use crate::{matrix::sparse::Entries, model::objective::Gradient, problem::Bounds};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

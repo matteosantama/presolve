@@ -2,15 +2,24 @@
 // Modified for this library; copyright and attribution notices are in NOTICE.
 //! Mutable working model and shared rule transformations. Every mutation
 //! updates sparse views, locks, dirty activities, and rule queues together.
+//! Rule families in `crate::rules` drive the mutations; the recovery tape
+//! records them for `crate::postsolve` to reverse.
+//! Native dual signs satisfy:
+//! `P x + c = A^T y + z`, with positive multipliers on lower bounds.
+
+pub(crate) mod activity;
+pub(crate) mod objective;
+pub(crate) mod queues;
+pub(crate) mod tape;
 
 use crate::{
-    core::{
+    matrix::{linked::LinkedMatrix, sparse::Entries},
+    model::{
         activity::{Activity, Extreme, Locks},
         objective::Objective,
         queues::Queues,
+        tape::{Certificate, Equation, Point, Recovery, RecoveryTape, Rule, Side},
     },
-    matrix::{linked::LinkedMatrix, sparse::Entries},
-    postsolve::tape::{Certificate, Equation, Point, Recovery, RecoveryTape, Rule, Side},
     problem::Bounds,
 };
 use std::{sync::Arc, time::Instant};
@@ -50,17 +59,17 @@ pub(crate) struct Model {
     pub revision: usize,
     /// Run configuration, applied once by `configure`.
     pub settings: crate::settings::Settings,
-    pub dual_scratch: super::rules::dual_propagation::DualScratch,
-    pub dominated_scratch: super::rules::dominated_columns::DominatedScratch,
+    pub dual_scratch: crate::rules::dual_propagation::DualScratch,
+    pub dominated_scratch: crate::rules::dominated_columns::DominatedScratch,
     pub equality_stats: crate::result::EqualityStats,
-    pub substitution_failure: super::objective::SubstitutionFailure,
+    pub substitution_failure: self::objective::SubstitutionFailure,
     /// Hessian revision plus one at which a coupled column's elimination was
     /// last rejected, so cleanup does not retry it on every visit.
     pub elimination_rejected: Vec<usize>,
     pub deadline: Option<Instant>,
     pub cones: Vec<crate::problem::Cone>,
     pub cone_rows: Vec<Vec<usize>>,
-    pub changed_cones: crate::core::queues::Worklist,
+    pub changed_cones: crate::model::queues::Worklist,
 }
 
 /// A row never has this many infinite terms, so the count marks a cached
@@ -162,12 +171,12 @@ impl Model {
             dual_scratch: Default::default(),
             dominated_scratch: Default::default(),
             equality_stats: crate::result::EqualityStats::default(),
-            substitution_failure: super::objective::SubstitutionFailure::Numerical,
+            substitution_failure: self::objective::SubstitutionFailure::Numerical,
             elimination_rejected: vec![0; n],
             deadline: None,
             cones: vec![],
             cone_rows: vec![],
-            changed_cones: crate::core::queues::Worklist::new(0),
+            changed_cones: crate::model::queues::Worklist::new(0),
         };
         for i in 0..m {
             for (j, a) in model.a.row(i) {
@@ -580,7 +589,7 @@ impl Model {
         effective_bounds: Bounds,
         max_fill: usize,
     ) -> bool {
-        use super::objective::SubstitutionFailure;
+        use self::objective::SubstitutionFailure;
         self.substitution_failure = SubstitutionFailure::Numerical;
         let row = equation.row;
         let pivot = self.a.get(row, column);

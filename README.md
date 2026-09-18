@@ -75,8 +75,8 @@ into the objective, then remove the column. Quadratic cross terms update the
 remaining linear objective, and constant terms update `c₀`. For example, fixing
 `x = 2` changes `3x + y ≤ 10` to `y ≤ 4`. Fixing introduces no new coefficients;
 nonfinite transformed values cause the operation to be skipped.
-Source: [variables.rs](src/core/rules/variables.rs),
-[shared transformations](src/core/model.rs).
+Source: [variables.rs](src/rules/variables.rs),
+[shared transformations](src/model/mod.rs).
 
 **Empty columns — `empty_columns`.** A variable absent from all linear and conic
 rows can be optimized separately if it has no off-diagonal Hessian couplings.
@@ -86,7 +86,7 @@ upper bound for `c < 0`, or zero clipped to the bounds for `c = 0`. A finite
 choice is substituted and removed. A linear objective with an infinite improving
 side produces a recession ray. Variables coupled through `P` are retained
 unless the next rule applies.
-Source: [variables.rs](src/core/rules/variables.rs).
+Source: [variables.rs](src/rules/variables.rs).
 
 **Quadratic elimination — `quadratic_elimination`.** A free variable absent
 from all rows but coupled through `P` with `pⱼⱼ > 0` has the closed-form
@@ -101,13 +101,13 @@ evaluates the expression and sets the reduced cost to zero; the eliminated
 column's stationarity holds by construction. A bounded coupled variable is
 retained, since its clipped minimizer is not affine. The rule visits only the
 columns the empty-column queue already delivers.
-Source: [variables.rs](src/core/rules/variables.rs), [model.rs](src/core/model.rs).
+Source: [variables.rs](src/rules/variables.rs), [model.rs](src/model/mod.rs).
 
 **Empty rows — `empty_rows`.** A linear row with no coefficients reduces to
 `l ≤ 0 ≤ u`. The rule deletes it if satisfied within the feasibility tolerance,
 or produces an infeasibility certificate if a side excludes zero by more than
 that tolerance. Conic constant rows are handled as blocks by `cones`.
-Source: [rows.rs](src/core/rules/rows.rs).
+Source: [rows.rs](src/rules/rows.rs).
 
 **Singleton rows — `singleton_rows`.** Convert `l ≤ a x ≤ u` into bounds on `x`,
 reversing the sides when `a < 0`, and intersect them with the existing bounds.
@@ -115,7 +115,7 @@ For example, `2 ≤ -2x ≤ 6` gives `-3 ≤ x ≤ -1`. Delete the row only afte
 variable bounds fully represent its restriction. Contradictions beyond tolerance
 produce a certificate; overflow or a small inconsistent interval can leave the
 row in place. An equality can expose a fixed variable for the next cleanup pass.
-Source: [rows.rs](src/core/rules/rows.rs).
+Source: [rows.rs](src/rules/rows.rs).
 
 ### Bounds and optimality
 
@@ -135,7 +135,7 @@ For a positive coefficient `aⱼ` and residual activity `[r_min, r_max]`, the im
 bounds are `(l - r_max)/aⱼ ≤ xⱼ ≤ (u - r_min)/aⱼ`; negative coefficients reverse
 the bound directions. Unbounded residuals may prevent an implication. The rule
 skips very large or insignificant changes as described under numerical controls.
-Source: [bounds.rs](src/core/rules/bounds.rs).
+Source: [bounds.rs](src/rules/bounds.rs).
 
 **Redundant variable bounds — `redundant_bounds`.** After the main phases, remove
 a finite bound side if a retained linear row and the other variables' current
@@ -144,7 +144,7 @@ bounds imply a restriction at least as strong. For example, `x + y ≤ 5` and
 bounds disappear to avoid circular proofs. This final pass lets explicit bounds
 help earlier rules, then removes unnecessary bound constraints before solving.
 It is skipped when the main run reports a time limit.
-Source: [bounds.rs](src/core/rules/bounds.rs).
+Source: [bounds.rs](src/rules/bounds.rs).
 
 **Dual fixing — `dual_fixing`.** Use objective derivatives to prove that an
 optimum can be chosen at a variable bound when constraints do not block movement
@@ -165,7 +165,7 @@ toward it. This switch controls two passes:
 
 For example, minimizing `x` with `x ≥ 0` and only upper-sided constraints having
 positive coefficients of `x` permits fixing `x = 0`.
-Source: [dual_fixing.rs](src/core/rules/dual_fixing.rs).
+Source: [dual_fixing.rs](src/rules/dual_fixing.rs).
 
 **Dual propagation — `dual_propagation`.** Locks only use the structure of a
 column. This rule also uses magnitudes: it propagates the dual constraints
@@ -204,7 +204,7 @@ and off by default: in the Netlib and Maros–Mészáros comparison it removed
 rows) but its single pass added about 6% to the corpus presolve time, mostly
 on problems where it proves nothing. See
 `docs/benchmarks/new-rules-20260917/REPORT.md`.
-Source: [dual_propagation.rs](src/core/rules/dual_propagation.rs).
+Source: [dual_propagation.rs](src/rules/dual_propagation.rs).
 
 ### Substitution
 
@@ -224,8 +224,8 @@ retaining a transformed row. All these rules respect `substitution_fill`, reject
 nonfinite arithmetic, and forbid a net increase in Hessian nonzeros unless
 `allow_hessian_growth` is enabled. `substitution_fill = usize::MAX` removes the
 allocation cap; it does not by itself allow net Hessian growth.
-Sources: [substitution.rs](src/core/rules/substitution.rs),
-[model.rs](src/core/model.rs), [objective.rs](src/core/objective.rs).
+Sources: [substitution.rs](src/rules/substitution.rs),
+[model.rs](src/model/mod.rs), [objective.rs](src/model/objective.rs).
 
 **Singleton columns — `singleton_columns`.** Consider a variable appearing in
 exactly one row of the shared constraint matrix, where that row is linear and
@@ -300,7 +300,7 @@ sides. Hashes propose candidates; coefficient comparisons verify proportionality
 using `numerics.parallel`. A contradiction certificate requires exact
 proportionality and a gap beyond the feasibility margin. Creating a new equality
 from inequalities also requires exact proportionality.
-Source: [parallel.rs](src/core/rules/parallel.rs).
+Source: [parallel.rs](src/rules/parallel.rs).
 
 **Parallel columns — `parallel_columns`.** Suppose the shared constraint columns
 satisfy `M[:, k] = r M[:, j]`, where `M` includes both linear and conic rows.
@@ -320,7 +320,7 @@ The rule requires exact proportionality and the exact curvature relation
 Approximate column relations are insufficient for either reduction, even when
 they pass the initial candidate comparison. Postsolve splits an aggregate value
 back into variables satisfying their original bounds.
-Source: [parallel.rs](src/core/rules/parallel.rs).
+Source: [parallel.rs](src/rules/parallel.rs).
 
 **Dominated columns — `dominated_columns`.** Column `j` dominates column `k`
 when `cⱼ ≤ cₖ` and every row allows moving weight from `k` to `j`: the
@@ -348,7 +348,7 @@ off by default: in the Netlib and Maros–Mészáros comparison the identical-
 support test removed 1638 variables (STANDATA, STANDGUB and QSTANDAT lose 324
 each, WOODW 242) but added about 2% to the corpus presolve time. See
 `docs/benchmarks/new-rules-20260917/REPORT.md`.
-Source: [dominated_columns.rs](src/core/rules/dominated_columns.rs).
+Source: [dominated_columns.rs](src/rules/dominated_columns.rs).
 
 ### Matrix sparsity
 
@@ -367,14 +367,14 @@ saving after accounting for the activity variable and finite bound sides. It
 limits search work, coefficient growth, and scaling; rejects overflow and tiny
 nonzero cancellation residuals; and does not change `P`. Cleanup runs afterward
 to exploit any new singletons or bound implications.
-Source: [sparsification.rs](src/core/rules/sparsification.rs).
+Source: [sparsification.rs](src/rules/sparsification.rs).
 
 ### Cone geometry
 
 All reductions below share the **`cones`** switch. A coordinate is
 **structurally zero** only when its constraint row is empty and its right-hand
 side is exactly zero, so its slack is identically zero. Near-zero values do not
-qualify. Sources: [cones.rs](src/core/rules/cones.rs),
+qualify. Sources: [cones.rs](src/rules/cones.rs),
 [membership and separation](src/problem/cone.rs).
 
 | Cone or pattern | Implemented reduction |
@@ -400,7 +400,7 @@ zero-head face reduction in this implementation.
 
 ## Scheduling and numerical controls
 
-The [scheduler](src/core/schedule.rs) runs rules in the following order. The
+The [scheduler](src/rules/mod.rs) runs rules in the following order. The
 thresholds below describe the default configuration:
 
 1. **Cleanup to stability:** fixed variables, cones, empty columns, simple dual

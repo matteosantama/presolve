@@ -1,13 +1,9 @@
 //! Presolve entry point, working-model preparation, and result packing.
 use crate::{
-    core::{
-        execution::Executor,
-        model::{Model, RowDomain},
-    },
+    executor::Executor,
     matrix::quadratic::Quadratic,
-    postsolve::{
-        Coordinates, OriginalMap, Postsolve, PrimalCertificate, SolutionRef, tape::Recovery,
-    },
+    model::{Model, RowDomain, tape::Recovery},
+    postsolve::{Coordinates, OriginalMap, Postsolve, PrimalCertificate, SolutionRef},
     problem::{Bounds, Cone, Constraint, Matrix, Problem, row_indices},
     result::{Outcome, PresolveResult, ReducedProblem, Size, Stats, UnboundednessCertificate},
     settings::Settings,

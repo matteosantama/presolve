@@ -4,11 +4,9 @@
 //! propose groups; sparse comparisons establish proportionality before edits.
 
 use crate::{
-    core::{
-        execution::Executor,
-        model::{Model, RowDomain},
-    },
-    postsolve::tape::{Certificate, Rule, Side},
+    executor::Executor,
+    model::tape::{Certificate, Rule, Side},
+    model::{Model, RowDomain},
     problem::Bounds,
 };
 use wide::{f64x4, u32x4};

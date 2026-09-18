@@ -5,8 +5,8 @@
 //! feasible point can slide until the dominated variable reaches its bound.
 
 use crate::{
-    core::model::{Model, RowDomain},
-    postsolve::tape::{Certificate, Side},
+    model::tape::{Certificate, Side},
+    model::{Model, RowDomain},
     problem::Bounds,
 };
 

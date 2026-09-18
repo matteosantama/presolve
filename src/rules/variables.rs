@@ -2,7 +2,7 @@
 // Modified for this library; copyright and attribution notices are in NOTICE.
 //! Fix known variables and eliminate independent empty columns.
 
-use crate::{core::model::Model, postsolve::tape::Certificate, problem::Bounds};
+use crate::{model::Model, model::tape::Certificate, problem::Bounds};
 
 /// Beyond this Hessian degree the Schur complement is dense enough that the
 /// no-growth check rejects the elimination anyway.

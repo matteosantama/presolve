@@ -1,9 +1,9 @@
 //! Bounded exact-arithmetic equality dependencies, without changing A or P
 //! until a complete relation has been established in scratch storage.
 use crate::{
-    core::model::{Model, RowDomain},
     matrix::sparse::Entries,
-    postsolve::tape::{Certificate, Rule},
+    model::tape::{Certificate, Rule},
+    model::{Model, RowDomain},
 };
 use std::time::Instant;
 

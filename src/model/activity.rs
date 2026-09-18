@@ -2,7 +2,7 @@
 // Modified for this library; copyright and attribution notices are in NOTICE.
 //! Row activity bounds and counts of constraints that lock variable directions.
 
-use crate::{core::model::RowDomain, postsolve::tape::Side, problem::Bounds};
+use crate::{model::RowDomain, model::tape::Side, problem::Bounds};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Locks {

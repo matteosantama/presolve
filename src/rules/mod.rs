@@ -1,11 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 // Modified for this library; copyright and attribution notices are in NOTICE.
-//! Phase scheduling and cleanup. Cheap cleanup surrounds
-//! fast and medium exploration. A cycle ends after medium exploration.
+//! Rule families, organized by the model property they act on, and their
+//! phase scheduling. Each family checks applicability and uses `Model`
+//! mutations to update sparse storage, work queues, and recovery records
+//! together. Cheap cleanup surrounds fast and medium exploration; a cycle
+//! ends after medium exploration.
+
+mod bounds;
+mod cones;
+mod dependencies;
+pub(crate) mod dominated_columns;
+mod dual_fixing;
+pub(crate) mod dual_propagation;
+mod parallel;
+mod rows;
+mod sparsification;
+mod substitution;
+mod variables;
 
 use crate::{
-    core::{execution::Executor, model::Model},
-    postsolve::tape::Certificate,
+    executor::Executor,
+    model::{Model, tape::Certificate},
     settings::Progress,
 };
 use std::time::{Duration, Instant};
@@ -139,7 +154,7 @@ impl Model {
                     // A pivot's degree or curvature can change without editing
                     // this equality itself. Revisit those candidates next cycle.
                     for (i, row) in self.rows.iter().enumerate() {
-                        if matches!(row, crate::core::model::RowDomain::Linear(b) if b.equality()) {
+                        if matches!(row, crate::model::RowDomain::Linear(b) if b.equality()) {
                             match self.a.row(i).len() {
                                 2 => self.queues.doubleton_rows.push(i),
                                 3.. => self.queues.short_equalities.push(i),

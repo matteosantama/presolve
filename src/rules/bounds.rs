@@ -3,11 +3,11 @@
 //! Propagate implied bounds and remove redundant variable bounds.
 
 use crate::{
-    core::{
+    model::{
+        Model, RowDomain,
         activity::Activity,
-        model::{Model, RowDomain},
+        tape::{Certificate, Equation, Side},
     },
-    postsolve::tape::{Certificate, Equation, Side},
     problem::Bounds,
 };
 use std::sync::Arc;

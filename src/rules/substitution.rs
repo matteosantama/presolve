@@ -4,7 +4,7 @@
 //! Shared model mutations account for Hessian fill and gradient recovery.
 
 use crate::{
-    core::model::{Model, RowDomain},
+    model::{Model, RowDomain},
     problem::Bounds,
 };
 use std::time::Instant;
@@ -126,7 +126,7 @@ impl Model {
                     break;
                 }
                 self.equality_stats.rejected_updates += 1;
-                use crate::core::objective::SubstitutionFailure;
+                use crate::model::objective::SubstitutionFailure;
                 match self.substitution_failure {
                     SubstitutionFailure::Numerical => self.equality_stats.numerical_rejections += 1,
                     SubstitutionFailure::ConstraintFill => {

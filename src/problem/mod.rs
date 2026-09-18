@@ -237,8 +237,8 @@ impl Problem {
             cones: self.cones,
         }
     }
-    pub(crate) fn take_objective(&mut self) -> crate::core::objective::Objective {
-        crate::core::objective::Objective {
+    pub(crate) fn take_objective(&mut self) -> crate::model::objective::Objective {
+        crate::model::objective::Objective {
             p: self.p.as_ref().map_or_else(
                 || crate::matrix::sparse::SymmetricMatrix::zeros(self.c.len()),
                 Quadratic::working,

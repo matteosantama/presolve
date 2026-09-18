@@ -9,12 +9,12 @@
 //! direction is verified exactly on the current model before it is used.
 
 use crate::{
-    core::{
+    model::{
+        Model, RowDomain,
         activity::Activity,
-        model::{Model, RowDomain},
         queues::Worklist,
+        tape::{Certificate, Side},
     },
-    postsolve::tape::{Certificate, Side},
     problem::Bounds,
 };
 use std::collections::BTreeMap;

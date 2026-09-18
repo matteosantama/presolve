@@ -1,8 +1,8 @@
 //! Incremental, exact structural cone simplification.
 use crate::problem::{Bounds, Cone};
 use crate::{
-    core::model::{Model, RowDomain},
-    postsolve::tape::{Certificate, Rule},
+    model::tape::{Certificate, Rule},
+    model::{Model, RowDomain},
 };
 
 impl Model {

@@ -3,8 +3,8 @@
 //! Use objective derivatives and constraint locks to fix variables.
 
 use crate::{
-    core::model::Model,
-    postsolve::tape::{Certificate, Side},
+    model::Model,
+    model::tape::{Certificate, Side},
 };
 
 impl Model {
