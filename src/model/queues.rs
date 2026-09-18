@@ -78,7 +78,7 @@ impl Worklist {
         self.entries.clear();
     }
 
-    #[cfg(test)]
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

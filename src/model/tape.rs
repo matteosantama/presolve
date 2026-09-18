@@ -80,9 +80,41 @@ impl Equation {
     }
 }
 
-/// An applied rule and the data needed to reverse its changes.
+/// One equation in a parent-before-child doubleton chain.
 #[derive(Clone, Debug)]
+pub(crate) struct DoubletonStep {
+    pub column: usize,
+    pub parent: usize,
+    pub row: usize,
+    pub pivot: f64,
+    pub other: f64,
+    pub rhs: f64,
+    pub objective: f64,
+    pub entries: Entries,
+}
+
+/// A free SOC tail variable: its original slack is `sign * x[column]`.
+#[derive(Clone, Debug)]
+pub(crate) struct SocDirection {
+    pub column: usize,
+    pub row: usize,
+    pub weight: f64,
+    pub sign: f64,
+}
+
+#[derive(Clone, Debug)]
+/// An applied rule and the data needed to reverse its changes.
 pub(crate) enum Rule {
+    DoubletonChain {
+        steps: Vec<DoubletonStep>,
+    },
+    /// Keep one normalized direction and discard orthogonal, unconstrained
+    /// directions. The same isometry lifts primal and conic dual coordinates.
+    SocAggregated {
+        column: usize,
+        row: usize,
+        members: Vec<SocDirection>,
+    },
     /// Evaluate at this point in reverse traversal, before earlier variable
     /// aggregations/substitutions change the meaning of the stored coefficients.
     ConeSlack {
@@ -207,6 +239,29 @@ fn active(x: f64, bound: f64) -> bool {
 }
 
 impl RecoveryTape {
+    pub fn transforms_conic_coordinates(&self) -> bool {
+        self.rules
+            .iter()
+            .any(|rule| matches!(rule, Rule::SocAggregated { .. }))
+    }
+
+    /// Transform caller-provided slacks as coordinates, independently of
+    /// the primal values: an approximate warm start may not satisfy Gx+s=h.
+    pub fn reduce_slacks(&self, slacks: &mut [f64]) {
+        for rule in &self.rules {
+            if let Rule::SocAggregated { row, members, .. } = rule {
+                let value = members
+                    .iter()
+                    .map(|m| m.sign * m.weight * slacks[m.row])
+                    .sum();
+                for member in members {
+                    slacks[member.row] = 0.0;
+                }
+                slacks[*row] = value;
+            }
+        }
+    }
+
     /// Indices are stable model IDs; auxiliary columns are appended. The
     /// adapter packs coordinates, so this tape also recovers early presolve rays.
     pub fn recover(&self, point: &mut Point, mode: Recovery) {
@@ -215,6 +270,52 @@ impl RecoveryTape {
     pub fn recover_with_slacks(&self, point: &mut Point, mode: Recovery, slacks: &mut [f64]) {
         for rule in self.rules.iter().rev() {
             match rule {
+                Rule::DoubletonChain { steps } => {
+                    if mode.primal() {
+                        for step in steps {
+                            point.x[step.column] = (mode.offset(step.rhs)
+                                - step.other * point.x[step.parent])
+                                / step.pivot;
+                        }
+                    }
+                    if mode.dual() {
+                        for step in steps.iter().rev() {
+                            let g = if mode == Recovery::Solution {
+                                step.objective
+                            } else {
+                                0.0
+                            };
+                            point.z[step.column] = 0.0;
+                            point.y[step.row] = (g - step
+                                .entries
+                                .iter()
+                                .map(|&(i, a)| a * point.y[i])
+                                .sum::<f64>())
+                                / step.pivot;
+                        }
+                    }
+                }
+                Rule::SocAggregated {
+                    column,
+                    row,
+                    members,
+                } => {
+                    let x = point.x[*column];
+                    let y = point.y[*row];
+                    let slack = slacks.get(*row).copied().unwrap_or(0.0);
+                    for member in members {
+                        if mode.primal() {
+                            point.x[member.column] = member.weight * x;
+                            if !slacks.is_empty() {
+                                slacks[member.row] = member.sign * member.weight * slack;
+                            }
+                        }
+                        if mode.dual() {
+                            point.y[member.row] = member.sign * member.weight * y;
+                            point.z[member.column] = 0.0;
+                        }
+                    }
+                }
                 Rule::ConeSlack { row, rhs, entries } => {
                     if !mode.primal() || slacks.is_empty() {
                         continue;
@@ -443,6 +544,32 @@ impl RecoveryTape {
     pub fn reduce_point(&self, point: &mut Point) {
         for rule in &self.rules {
             match rule {
+                Rule::DoubletonChain { steps } => {
+                    for step in steps.iter().rev() {
+                        point.z[step.parent] -= step.other * point.z[step.column] / step.pivot;
+                        point.z[step.column] = 0.0;
+                        point.y[step.row] = 0.0;
+                    }
+                }
+                Rule::SocAggregated {
+                    column,
+                    row,
+                    members,
+                } => {
+                    let x = members.iter().map(|m| m.weight * point.x[m.column]).sum();
+                    let y = members
+                        .iter()
+                        .map(|m| m.sign * m.weight * point.y[m.row])
+                        .sum();
+                    let z = members.iter().map(|m| m.weight * point.z[m.column]).sum();
+                    for member in members {
+                        point.y[member.row] = 0.0;
+                        point.z[member.column] = 0.0;
+                    }
+                    point.x[*column] = x;
+                    point.y[*row] = y;
+                    point.z[*column] = z;
+                }
                 Rule::ConeSlack { .. } => (),
                 Rule::PsdZeroFace { rows, order } => {
                     for j in 0..*order {

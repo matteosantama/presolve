@@ -254,3 +254,119 @@ fn multirow_proofs_survive_prior_dependency_deletions() {
         assert_eq!(residual, 0.);
     }
 }
+
+fn leaf_chain_fixture(inconsistent: bool, oversized_equality: bool) -> Problem {
+    let core = fixture(false, 0., inconsistent);
+    let mut ir = vec![0, 0, 1, 1, 2, 2];
+    let mut jc = vec![6, 7, 7, 8, 8, 0];
+    let mut values = vec![1.; 6];
+    for j in 0..6 {
+        for k in core.a.column_pointers()[j]..core.a.column_pointers()[j + 1] {
+            ir.push(core.a.row_indices()[k] + 3);
+            jc.push(j);
+            values.push(core.a.values()[k]);
+        }
+    }
+    // This row must not affect degrees in the eligible equality subsystem.
+    for j in if oversized_equality {
+        vec![0, 1, 2, 3, 4, 5, 6]
+    } else {
+        vec![6]
+    } {
+        ir.push(6);
+        jc.push(j);
+        values.push(1.);
+    }
+    let mut rows = vec![Constraint::Linear(Bounds::fixed(2.)); 3];
+    rows.extend(core.rows);
+    rows.push(Constraint::Linear(if oversized_equality {
+        Bounds::fixed(7.)
+    } else {
+        Bounds {
+            lower: 0.,
+            upper: 2.,
+        }
+    }));
+    let a = CscMatrix::from_triplets(7, 9, ir, jc, values).unwrap();
+    // x=1 and unit equality multipliers satisfy KKT for the consistent model.
+    let c = (0..9)
+        .map(|j| {
+            (a.column_pointers()[j]..a.column_pointers()[j + 1])
+                .filter(|&k| oversized_equality || a.row_indices()[k] != 6)
+                .map(|k| a.values()[k])
+                .sum()
+        })
+        .collect();
+    Problem {
+        p: None,
+        c,
+        c0: 0.,
+        a,
+        rows,
+        variable_bounds: vec![Bounds::FREE; 9],
+        cones: vec![],
+    }
+}
+
+#[test]
+fn recursive_peeling_preserves_basis_budget_and_original_constraints() {
+    for oversized_equality in [false, true] {
+        let input = leaf_chain_fixture(false, oversized_equality);
+        let mut options = settings();
+        options.dependencies.max_basis_rows = 2;
+        options.dependencies.max_row_length = 6;
+        let result = Presolver::new(options).unwrap().presolve(input.clone());
+        let Outcome::Reduced(reduced) = result.outcome else {
+            panic!("core dependence was missed")
+        };
+        assert_eq!(reduced.problem.rows.len(), 6);
+        assert_eq!(reduced.problem.c.len(), 9);
+        let mut point = Solution {
+            x: vec![1.; 9],
+            y: vec![1.; 7],
+            z: vec![0.; 9],
+            conic_dual: vec![],
+            conic_slack: vec![],
+        };
+        if !oversized_equality {
+            point.y[6] = 0.;
+        }
+        let warm = reduced.postsolve.reduce_warm_start(point.as_ref());
+        stationarity(&reduced.problem, &warm);
+        let recovered = reduced.postsolve.recover_solution(warm.as_ref());
+        assert_eq!(recovered.x, point.x);
+        // All three peeled rows remain and their multipliers are untouched.
+        assert_eq!(recovered.y[..3], point.y[..3]);
+        stationarity(&input, &recovered);
+    }
+}
+
+#[test]
+fn recursive_peeling_keeps_inconsistent_core_and_lifts_its_certificate() {
+    let input = leaf_chain_fixture(true, false);
+    let mut options = settings();
+    options.dependencies.max_basis_rows = 2;
+    let result = Presolver::new(options).unwrap().presolve(input.clone());
+    let Outcome::Infeasible(certificate) = result.outcome else {
+        panic!("inconsistent core was missed")
+    };
+    assert_eq!(certificate.y[..3], [0.; 3]);
+    for j in 0..9 {
+        let residual: f64 = (input.a.column_pointers()[j]..input.a.column_pointers()[j + 1])
+            .map(|k| input.a.values()[k] * certificate.y[input.a.row_indices()[k]])
+            .sum();
+        assert_eq!(residual, 0.);
+    }
+    let contradiction: f64 = input
+        .rows
+        .iter()
+        .zip(certificate.y)
+        .map(|(row, y)| {
+            let Constraint::Linear(b) = row else {
+                unreachable!()
+            };
+            y * if y >= 0. { b.lower } else { b.upper }
+        })
+        .sum();
+    assert!(contradiction > 0.);
+}

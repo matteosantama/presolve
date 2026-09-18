@@ -320,10 +320,28 @@ fn build_postsolve(
     } else {
         inverse(&input_conic, model.rows.len())
     };
+    let transformed: std::collections::HashSet<_> =
+        if coordinates.compact_to_stable_conic_rows.is_empty() {
+            std::collections::HashSet::new()
+        } else {
+            model
+                .postsolve
+                .rules
+                .iter()
+                .filter_map(|rule| {
+                    if let crate::model::tape::Rule::SocAggregated { row, .. } = rule {
+                        Some(*row)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
     let direct_slacks = coordinates
         .compact_to_stable_conic_rows
         .iter()
         .enumerate()
+        .filter(|&(_, i)| !transformed.contains(i))
         .map(|(at, &i)| (original_positions[i], at))
         .collect();
     let postsolve = Postsolve {

@@ -9,6 +9,9 @@ use crate::{
 };
 use std::time::Instant;
 
+#[path = "doubleton_chains.rs"]
+mod doubleton_chains;
+
 impl Model {
     /// Equality substitution with bounded stable alternatives and sparse-work scoring.
     pub fn short_equalities(&mut self, deadline: Instant) {
@@ -272,8 +275,14 @@ impl Model {
     }
 
     pub fn doubleton_equalities(&mut self) {
+        let round = self.queues.doubleton_rows.take_round();
+        self.batch_doubleton_chains(&round);
+        self.doubleton_round(round);
+    }
+
+    fn doubleton_round(&mut self, round: Vec<usize>) {
         let max_fill = self.settings.substitution_fill;
-        for i in self.queues.doubleton_rows.take_round() {
+        for i in round {
             if self.deadline.is_some_and(|d| Instant::now() >= d) {
                 break;
             }

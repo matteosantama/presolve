@@ -248,7 +248,7 @@ impl LinkedMatrix {
     pub fn pack(&self, rows: &[usize], stable_to_compact: &[usize], columns: usize) -> CscMatrix {
         let mut pointers = vec![0; columns + 1];
         for (j, &compact) in stable_to_compact.iter().enumerate() {
-            if compact != NONE as usize {
+            if compact != usize::MAX {
                 pointers[compact + 1] = self.lists[1][j].len as usize;
             }
         }
@@ -272,14 +272,14 @@ impl LinkedMatrix {
         }
         if filled != nnz {
             let mut packed = vec![0; columns + 1];
-            let mut rows = Vec::with_capacity(filled);
+            let mut indices = Vec::with_capacity(filled);
             let mut vals = Vec::with_capacity(filled);
             for j in 0..columns {
-                rows.extend_from_slice(&ri[pointers[j]..next[j]]);
+                indices.extend_from_slice(&ri[pointers[j]..next[j]]);
                 vals.extend_from_slice(&values[pointers[j]..next[j]]);
-                packed[j + 1] = rows.len();
+                packed[j + 1] = indices.len();
             }
-            return CscMatrix::from_parts(rows.len(), columns, packed, rows, vals);
+            return CscMatrix::from_parts(rows.len(), columns, packed, indices, vals);
         }
         CscMatrix::from_parts(rows.len(), columns, pointers, ri, values)
     }
@@ -605,6 +605,24 @@ impl LinkedMatrix {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn packing_skips_removed_columns_and_preserves_row_count_when_filtering() {
+        let a =
+            LinkedMatrix::from_columns(4, 3, |j| (0..4).map(move |i| (i, (1 + i + 4 * j) as f64)));
+        // Filtering rows can leave packed column segments shorter than their
+        // original linked lengths; the result still has two rows, not six.
+        let packed = a.pack(&[1, 3], &[0, 1, 2], 3);
+        assert_eq!(packed.rows(), 2);
+        assert_eq!(packed.column_pointers(), [0, 2, 4, 6]);
+        assert_eq!(packed.row_indices(), [0, 1, 0, 1, 0, 1]);
+        let mut a = a;
+        a.remove_column(1);
+        let packed = a.pack(&[1, 3], &[0, usize::MAX, 1], 2);
+        assert_eq!(packed.rows(), 2);
+        assert_eq!(packed.column_pointers(), [0, 2, 4]);
+        assert_eq!(packed.values(), [2., 4., 10., 12.]);
+    }
+
     #[test]
     fn row_replacement_retains_live_nodes_and_returns_original_coefficients() {
         let mut a = LinkedMatrix::zeros(3, 5);

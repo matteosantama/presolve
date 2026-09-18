@@ -167,6 +167,8 @@ impl Postsolve {
             conic_slack: vec![0.; self.input_conic.len()],
         }
     }
+    /// Original/reduced coordinate pairs whose slacks survive without a
+    /// coordinate transformation. Use `reduce_warm_start` for the full map.
     pub fn surviving_conic_coordinates(&self) -> &[(usize, usize)] {
         &self.direct_slacks
     }
@@ -229,16 +231,30 @@ impl Postsolve {
         self.original().scatter(&mut p, point);
         self.tape.reduce_point(&mut p);
         let (x, z, y, conic_dual) = self.coordinates.gather(&p);
+        let conic_slack =
+            if !self.input_conic.is_empty() && self.tape.transforms_conic_coordinates() {
+                let mut slacks = vec![0.0; self.total_rows];
+                for (&row, &value) in self.input_conic.iter().zip(point.conic_slack) {
+                    slacks[row] = value;
+                }
+                self.tape.reduce_slacks(&mut slacks);
+                self.coordinates
+                    .compact_to_stable_conic_rows
+                    .iter()
+                    .map(|&row| slacks[row])
+                    .collect()
+            } else {
+                self.direct_slacks
+                    .iter()
+                    .map(|&(original, _)| point.conic_slack[original])
+                    .collect()
+            };
         Solution {
             x,
             z,
             y,
             conic_dual,
-            conic_slack: self
-                .direct_slacks
-                .iter()
-                .map(|&(original, _)| point.conic_slack[original])
-                .collect(),
+            conic_slack,
         }
     }
 }
