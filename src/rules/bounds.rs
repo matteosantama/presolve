@@ -209,6 +209,14 @@ impl Model {
             }
             return Ok(false);
         }
+        // Most calls end here. With `lower <= upper` established, a value
+        // that is not tighter has a nonpositive gain, so the threshold test
+        // below would reject it anyway.
+        if (side == Side::Lower && value <= old.lower)
+            || (side == Side::Upper && value >= old.upper)
+        {
+            return Ok(false);
+        }
         if propagation && side.value(old).is_finite() && value != opposite {
             // Skip insignificant finite changes using a relative threshold
             // and a floor scaled by the configured feasibility tolerance.
@@ -223,11 +231,6 @@ impl Model {
             {
                 return Ok(false);
             }
-        }
-        if (side == Side::Lower && value <= old.lower)
-            || (side == Side::Upper && value >= old.upper)
-        {
-            return Ok(false);
         }
         let equation = proof(self);
         Ok(self.tighten_bound(j, side, value, equation))
