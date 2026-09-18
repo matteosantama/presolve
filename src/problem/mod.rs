@@ -19,14 +19,23 @@ pub enum Constraint {
     Cone { rhs: f64, block: usize },
 }
 
-/// A native problem. The two matrices are opaque: a caller's CSC input is
-/// kept as is, and a reduced problem keeps the working model's editable
-/// storage until CSC is requested. Empty variable bounds mean free variables.
-/// `p` stores the upper triangle of the symmetric PSD Hessian, including its
-/// diagonal. `a` contains all rows; cone dimensions must agree with
-/// consecutive row blocks. Sparse columns must have sorted unique row indices
-/// and finite coefficients, and dimensions and nonzero counts must fit below
-/// u32::MAX. No validation is performed by `presolve`.
+/// Minimize `0.5 xᵀ P x + cᵀ x + c0` over `x` with `variable_bounds[j].lower ≤
+/// x[j] ≤ variable_bounds[j].upper`, subject to one constraint per row of `a`:
+/// row `i` is a ranged linear row when `rows[i]` is `Constraint::Linear`, and
+/// one coordinate of a cone block when it is `Constraint::Cone`. Consecutive
+/// cone rows sharing a `block` form that block, whose slacks lie in
+/// `cones[block]` and whose right-hand sides are the tags' `rhs` values.
+///
+/// `p` holds the upper triangle of the symmetric positive semidefinite `P`,
+/// including its diagonal; `None` means a linear objective. Empty
+/// `variable_bounds` means every variable is free. The two matrices are
+/// opaque: a caller's CSC input is kept as is, and a reduced problem keeps
+/// the working model's editable storage until CSC is requested.
+///
+/// Sparse columns must have sorted unique row indices and finite
+/// coefficients, cone dimensions must agree with their row blocks, and
+/// dimensions and nonzero counts must fit below `u32::MAX`. No validation is
+/// performed by `presolve`.
 #[derive(Clone, Debug)]
 pub struct Problem {
     pub p: Option<QuadraticMatrix>,
