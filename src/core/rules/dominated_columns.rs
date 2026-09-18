@@ -5,10 +5,7 @@
 //! feasible point can slide until the dominated variable reaches its bound.
 
 use crate::{
-    core::{
-        activity::Activity,
-        model::{Model, RowDomain},
-    },
+    core::model::{Model, RowDomain},
     postsolve::tape::{Certificate, Point, Recovery, Side},
     problem::Bounds,
 };
@@ -53,18 +50,6 @@ impl DominatedScratch {
 }
 
 impl Model {
-    /// A linear column: absent from the Hessian and from every conic row.
-    fn linear_column(&self, j: usize) -> bool {
-        self.alive[j]
-            && self.objective.p.column(j).is_empty()
-            && (self.cones.is_empty()
-                || self
-                    .a
-                    .column(j)
-                    .iter()
-                    .all(|(i, _)| matches!(self.rows[i], RowDomain::Linear(_))))
-    }
-
     /// Entries in equality and ranged rows must agree exactly between the two
     /// columns of a dominated pair, so their hash is a cheap necessary condition.
     fn equality_fingerprint(&self, j: usize) -> u64 {
@@ -86,40 +71,10 @@ impl Model {
     /// side too. Cached activities only; a cancellation-prone row is skipped
     /// rather than recomputed, which is conservative.
     fn open_sides(&mut self, j: usize) -> u8 {
-        let b = self.bounds[j];
         let mut open = 0;
         for (side, flag) in [(Side::Upper, UPPER_OPEN), (Side::Lower, LOWER_OPEN)] {
-            if !side.value(b).is_finite() {
+            if !side.value(self.bounds[j]).is_finite() || self.bound_implied(j, side, false) {
                 open |= flag;
-                continue;
-            }
-            let mut cursor = self.a.column(j).cursor();
-            while let Some((i, a)) = cursor.next(&self.a) {
-                let RowDomain::Linear(row) = self.rows[i] else {
-                    continue;
-                };
-                let act = self.activity(i);
-                let (min, max) = Activity::terms(a, b);
-                let from_lower = (side == Side::Lower) == (a > 0.0);
-                let (rhs, extreme, term) = if from_lower {
-                    (row.lower, act.max, max)
-                } else {
-                    (row.upper, act.min, min)
-                };
-                if !rhs.is_finite() {
-                    continue;
-                }
-                let implied = extreme
-                    .excluding(term)
-                    .map(|v| (rhs - v) / a)
-                    .is_some_and(|bound| match side {
-                        Side::Lower => bound.is_finite() && bound >= b.lower,
-                        Side::Upper => bound.is_finite() && bound <= b.upper,
-                    });
-                if implied {
-                    open |= flag;
-                    break;
-                }
             }
         }
         open

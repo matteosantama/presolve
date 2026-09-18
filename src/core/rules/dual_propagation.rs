@@ -96,18 +96,6 @@ enum Shift {
 }
 
 impl Model {
-    /// A column whose reduced cost is `c_j - Σ a_ij y_i` over linear rows only.
-    fn dual_column(&self, j: usize) -> bool {
-        self.alive[j]
-            && self.objective.p.column(j).is_empty()
-            && (self.cones.is_empty()
-                || self
-                    .a
-                    .column(j)
-                    .iter()
-                    .all(|(i, _)| matches!(self.rows[i], RowDomain::Linear(_))))
-    }
-
     /// Interval for `Σ a_ij y_i` implied by the sign of the reduced cost.
     fn dual_row_range(&self, b: Bounds, j: usize) -> Option<Bounds> {
         let c = self.objective.c[j];
@@ -135,7 +123,7 @@ impl Model {
         let m = self.rows.len();
         let n = self.bounds.len();
         // A problem whose live columns all carry curvature has no dual row.
-        if !(0..n).any(|j| self.dual_column(j) && !self.a.column(j).is_empty()) {
+        if !(0..n).any(|j| self.linear_column(j) && !self.a.column(j).is_empty()) {
             return Ok(0);
         }
         let mut scratch = std::mem::take(&mut self.dual_scratch);
@@ -157,7 +145,7 @@ impl Model {
             .resolve(self.a.nnz().saturating_mul(4));
         let mut work = budget;
         for j in 0..n {
-            if self.dual_column(j) && self.dual_row_range(self.bounds[j], j).is_some() {
+            if self.linear_column(j) && self.dual_row_range(self.bounds[j], j).is_some() {
                 scratch.queue.push(j);
             }
         }
@@ -192,7 +180,7 @@ impl Model {
                 let Some(range) = self.dual_row_range(self.bounds[j], j) else {
                     continue;
                 };
-                if !self.dual_column(j) {
+                if !self.linear_column(j) {
                     continue;
                 }
                 let activity = Activity::compute(column, &scratch.y, None);
@@ -219,37 +207,9 @@ impl Model {
                     continue;
                 }
                 for (i, a) in column {
-                    let (min_term, max_term) = Activity::terms(a, scratch.y[i]);
-                    let from_lower = if range.lower.is_finite() {
-                        activity
-                            .max
-                            .excluding(max_term)
-                            .or_else(|| {
-                                (activity.max.infinite == usize::from(!max_term.is_finite()))
-                                    .then(|| {
-                                        Activity::compute(column, &scratch.y, Some(i)).max.value()
-                                    })
-                                    .flatten()
-                            })
-                            .map(|v| (range.lower - v) / a)
-                    } else {
-                        None
-                    };
-                    let from_upper = if range.upper.is_finite() {
-                        activity
-                            .min
-                            .excluding(min_term)
-                            .or_else(|| {
-                                (activity.min.infinite == usize::from(!min_term.is_finite()))
-                                    .then(|| {
-                                        Activity::compute(column, &scratch.y, Some(i)).min.value()
-                                    })
-                                    .flatten()
-                            })
-                            .map(|v| (range.upper - v) / a)
-                    } else {
-                        None
-                    };
+                    let (from_lower, from_upper) = activity.implied(a, scratch.y[i], range, || {
+                        Activity::compute(column, &scratch.y, Some(i))
+                    });
                     // A positive coefficient turns the lower constraint into a
                     // lower bound; a negative one flips the sides.
                     let (lower, upper) = if a > 0.0 {
@@ -320,7 +280,7 @@ impl Model {
                 }
             }
             for j in 0..n {
-                if !self.dual_column(j) || self.a.column(j).is_empty() {
+                if !self.linear_column(j) || self.a.column(j).is_empty() {
                     continue;
                 }
                 let b = self.bounds[j];
@@ -449,7 +409,7 @@ impl Model {
             if d == 0.0 {
                 continue;
             }
-            if !self.dual_column(j) {
+            if !self.linear_column(j) {
                 return Ok(false);
             }
             let b = self.bounds[j];

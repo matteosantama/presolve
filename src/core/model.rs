@@ -192,6 +192,19 @@ impl Model {
         model
     }
 
+    /// A linear column: alive, absent from the Hessian, and absent from every
+    /// conic row, so its reduced cost is `c_j - Σ a_ij y_i` over linear rows.
+    pub fn linear_column(&self, j: usize) -> bool {
+        self.alive[j]
+            && self.objective.p.column(j).is_empty()
+            && (self.cones.is_empty()
+                || self
+                    .a
+                    .column(j)
+                    .iter()
+                    .all(|(i, _)| matches!(self.rows[i], RowDomain::Linear(_))))
+    }
+
     pub fn add_variable(&mut self, bounds: Bounds) -> usize {
         let j = self.a.add_column();
         self.elimination_rejected.push(0);
@@ -277,7 +290,7 @@ impl Model {
         self.activities[row]
     }
 
-    pub fn residual_activity(&mut self, row: usize, column: usize) -> Activity {
+    pub fn residual_activity(&self, row: usize, column: usize) -> Activity {
         // This direct path is the cancellation fallback for the propagation
         // rule, which first tries subtracting from cached extremes.
         Activity::compute(self.a.row(row), &self.bounds, Some(column))

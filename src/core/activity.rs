@@ -2,7 +2,7 @@
 // Modified for this library; copyright and attribution notices are in NOTICE.
 //! Row activity bounds and counts of constraints that lock variable directions.
 
-use crate::{core::model::RowDomain, problem::Bounds};
+use crate::{core::model::RowDomain, postsolve::tape::Side, problem::Bounds};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Locks {
@@ -87,6 +87,27 @@ impl Extreme {
         (self.infinite == 0 && self.sum.is_finite()).then_some(self.sum)
     }
 
+    /// Bound implied for the excluded term's variable by `rhs`:
+    /// `(rhs - residual) / a`. When the cached sum cannot exclude the term
+    /// because of cancellation, `recompute` supplies the residual directly,
+    /// but only when this term is the sole infinite one: any other infinite
+    /// contribution keeps the residual infinite.
+    pub fn implied(
+        self,
+        term: f64,
+        rhs: f64,
+        a: f64,
+        recompute: impl FnOnce() -> Option<f64>,
+    ) -> Option<f64> {
+        self.excluding(term)
+            .or_else(|| {
+                (self.infinite == usize::from(!term.is_finite()))
+                    .then(recompute)
+                    .flatten()
+            })
+            .map(|v| (rhs - v) / a)
+    }
+
     pub fn excluding(self, term: f64) -> Option<f64> {
         if term.is_finite() {
             let residual = self.sum - term;
@@ -106,6 +127,82 @@ pub(crate) struct Activity {
 }
 
 impl Activity {
+    /// An activity that yields no finite extreme, for callers that decline to
+    /// recompute a residual.
+    pub const UNKNOWN: Self = Self {
+        min: Extreme {
+            sum: 0.0,
+            infinite: 1,
+        },
+        max: Extreme {
+            sum: 0.0,
+            infinite: 1,
+        },
+    };
+
+    /// Both bounds one row implies for the variable with coefficient `a` and
+    /// bounds `b`, as (from the row's lower side, from its upper side), each
+    /// only when that side is finite. `residual` recomputes the activity
+    /// without the variable when the cached extremes cannot exclude its term.
+    pub fn implied(
+        self,
+        a: f64,
+        b: Bounds,
+        rhs: Bounds,
+        residual: impl Fn() -> Activity,
+    ) -> (Option<f64>, Option<f64>) {
+        let (min_term, max_term) = Self::terms(a, b);
+        let lower = rhs
+            .lower
+            .is_finite()
+            .then(|| {
+                self.max
+                    .implied(max_term, rhs.lower, a, || residual().max.value())
+            })
+            .flatten();
+        let upper = rhs
+            .upper
+            .is_finite()
+            .then(|| {
+                self.min
+                    .implied(min_term, rhs.upper, a, || residual().min.value())
+            })
+            .flatten();
+        (lower, upper)
+    }
+
+    /// The bound implied for the variable's `side` by one row, when that
+    /// row's relevant extreme excludes the variable's own term.
+    pub fn implied_side(
+        self,
+        a: f64,
+        b: Bounds,
+        rhs: Bounds,
+        side: Side,
+        residual: impl Fn() -> Activity,
+    ) -> Option<f64> {
+        let (min_term, max_term) = Self::terms(a, b);
+        // A positive coefficient takes the variable's lower bound from the
+        // row's lower side; a negative one flips the sides.
+        if (side == Side::Lower) == (a > 0.0) {
+            rhs.lower
+                .is_finite()
+                .then(|| {
+                    self.max
+                        .implied(max_term, rhs.lower, a, || residual().max.value())
+                })
+                .flatten()
+        } else {
+            rhs.upper
+                .is_finite()
+                .then(|| {
+                    self.min
+                        .implied(min_term, rhs.upper, a, || residual().min.value())
+                })
+                .flatten()
+        }
+    }
+
     pub fn replace_bound(&mut self, a: f64, old: Bounds, new: Bounds) -> bool {
         let (old_min, old_max) = Self::terms(a, old);
         let (new_min, new_max) = Self::terms(a, new);

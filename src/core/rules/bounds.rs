@@ -69,33 +69,9 @@ impl Model {
             let mut equation = None;
             let mut cursor = self.a.row(i).cursor();
             while let Some((j, a)) = cursor.next(&self.a) {
-                let act = self.activity(i);
-                let (min_term, max_term) = Activity::terms(a, self.bounds[j]);
-                let lower = if bounds.lower.is_finite() {
-                    act.max
-                        .excluding(max_term)
-                        .or_else(|| {
-                            // Any other infinite contribution prevents a finite bound.
-                            (act.max.infinite == usize::from(!max_term.is_finite()))
-                                .then(|| self.residual_activity(i, j).max.value())
-                                .flatten()
-                        })
-                        .map(|v| (bounds.lower - v) / a)
-                } else {
-                    None
-                };
-                let upper = if bounds.upper.is_finite() {
-                    act.min
-                        .excluding(min_term)
-                        .or_else(|| {
-                            (act.min.infinite == usize::from(!min_term.is_finite()))
-                                .then(|| self.residual_activity(i, j).min.value())
-                                .flatten()
-                        })
-                        .map(|v| (bounds.upper - v) / a)
-                } else {
-                    None
-                };
+                let (lower, upper) = self
+                    .activity(i)
+                    .implied(a, self.bounds[j], bounds, || self.residual_activity(i, j));
                 if let Some(value) = lower {
                     tightened += usize::from(self.implied_bound(
                         j,
@@ -160,14 +136,17 @@ impl Model {
     }
 
     fn remove_redundant_bound(&mut self, j: usize, side: Side) {
-        if self.bound_implied(j, side) {
+        if self.bound_implied(j, side, true) {
             self.relax_bound(j, side);
         }
     }
 
     /// Whether one retained linear row and the other variables' current
-    /// bounds already enforce this finite side of column `j`.
-    pub(super) fn bound_implied(&mut self, j: usize, side: Side) -> bool {
+    /// bounds already enforce this finite side of column `j`. With
+    /// `recompute`, a row whose cached extreme cannot exclude the column's
+    /// term is recomputed; without it, such a row is skipped, which is
+    /// conservative.
+    pub(super) fn bound_implied(&mut self, j: usize, side: Side, recompute: bool) -> bool {
         let b = self.bounds[j];
         if !side.value(b).is_finite() {
             return false;
@@ -177,26 +156,14 @@ impl Model {
             let RowDomain::Linear(row) = self.rows[i] else {
                 continue;
             };
-            let act = self.activity(i);
-            let (min, max) = Activity::terms(a, b);
-            let from_lower = (side == Side::Lower) == (a > 0.0);
-            let (rhs, extreme, term) = if from_lower {
-                (row.lower, act.max, max)
-            } else {
-                (row.upper, act.min, min)
-            };
-            if !rhs.is_finite() || extreme.infinite != usize::from(!term.is_finite()) {
-                continue;
-            }
-            let residual = extreme.excluding(term).or_else(|| {
-                let residual = self.residual_activity(i, j);
-                if from_lower {
-                    residual.max.value()
+            let bound = self.activity(i).implied_side(a, b, row, side, || {
+                if recompute {
+                    self.residual_activity(i, j)
                 } else {
-                    residual.min.value()
+                    Activity::UNKNOWN
                 }
             });
-            let Some(bound) = residual.map(|v| (rhs - v) / a).filter(|v| v.is_finite()) else {
+            let Some(bound) = bound.filter(|v| v.is_finite()) else {
                 continue;
             };
             let implied = match side {
