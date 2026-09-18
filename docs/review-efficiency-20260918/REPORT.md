@@ -102,3 +102,10 @@ copy (bandwidth-bound; only a structure-of-arrays arena would help);
 
 Each step: identical reductions on both presets, then a matched fresh-process
 timing pair on a quiet machine.
+
+## Status (later the same day)
+
+Tier 1 landed in eight commits, d8471f1..e2a570b, each verified separately;
+end to end -9.5% sum of medians and geomean 0.89 with identical reductions.
+See `docs/benchmarks/efficiency-tier1-20260918/REPORT.md`. Tier 2 and the
+flagged items remain open.
