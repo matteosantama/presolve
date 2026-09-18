@@ -42,18 +42,24 @@ impl Model {
                 self.equality_stats.structural_rejections += 1;
                 continue;
             }
-            let largest = row.iter().map(|(_, a)| a.abs()).fold(0.0, f64::max);
+            // The bound and Hessian tests reject most candidates; load the
+            // column header and the row maximum only for the survivors.
+            let mut largest = None;
             candidates.clear();
             for (j, a) in row {
-                let degree = self.a.column(j).len();
                 if (options.require_free_variable && self.bounds[j] != Bounds::FREE)
                     || (options.require_linear_variable && !self.objective.p.column(j).is_empty())
-                    || degree < options.min_column_length
-                    || degree > options.max_column_length
                 {
                     self.equality_stats.structural_rejections += 1;
                     continue;
                 }
+                let degree = self.a.column(j).len();
+                if degree < options.min_column_length || degree > options.max_column_length {
+                    self.equality_stats.structural_rejections += 1;
+                    continue;
+                }
+                let largest = *largest
+                    .get_or_insert_with(|| row.iter().map(|(_, a)| a.abs()).fold(0.0, f64::max));
                 if a.abs() < largest && (relative == 1.0 || a.abs() / largest < relative) {
                     self.equality_stats.pivot_rejections += 1;
                     continue;
