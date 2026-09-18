@@ -170,6 +170,12 @@ fn candidate_groups<K: Ord + Copy + Send>(
 
 impl Model {
     pub fn parallel_rows(&mut self, executor: &Executor) -> Result<usize, Certificate> {
+        // A scan is a function of the row domains and the matrix; a repeat
+        // of a fruitless scan on the same state finds nothing.
+        let input = self.rows_revision;
+        if self.parallel_rows_seen == input {
+            return Ok(0);
+        }
         let entries = sorted_candidates(
             self.rows.len(),
             self.a.nnz(),
@@ -231,6 +237,9 @@ impl Model {
                     base = other;
                 }
             }
+        }
+        if self.rows_revision == input {
+            self.parallel_rows_seen = input;
         }
         Ok(comparisons)
     }
@@ -295,21 +304,45 @@ impl Model {
     }
 
     pub fn parallel_columns(&mut self, executor: &Executor) -> Result<usize, Certificate> {
-        let entries: Vec<(ColumnKey, usize)> = sorted_candidates(
+        let input = self.revision;
+        if self.parallel_columns_seen == input {
+            return Ok(0);
+        }
+        // Sort by the constraint key alone, then hash the Hessian column only
+        // inside runs of equal constraint key, where it decides the order.
+        // The result is the lexicographic `((a, p), index)` order, and almost
+        // no column sits in such a run, so almost no Hessian column is hashed.
+        let by_constraint: Vec<(u64, usize)> = sorted_candidates(
             self.bounds.len(),
             self.a.nnz().saturating_add(self.objective.p.nnz()),
             executor,
             |j| {
-                (self.alive[j] && !self.a.column(j).is_empty()).then(|| {
-                    let p = self.objective.p.column(j);
-                    (
-                        packed(fingerprint(self.a.column(j).iter())),
-                        (!p.is_empty()).then(|| packed(fingerprint(p.iter().copied()))),
-                    )
-                })
+                (self.alive[j] && !self.a.column(j).is_empty())
+                    .then(|| packed(fingerprint(self.a.column(j).iter())))
             },
-            |&(hash, _)| hash,
+            |&hash| hash,
         );
+        let mut entries: Vec<(ColumnKey, usize)> = Vec::with_capacity(by_constraint.len());
+        let mut start = 0;
+        while start < by_constraint.len() {
+            let hash = by_constraint[start].0;
+            let mut end = start + 1;
+            while end < by_constraint.len() && by_constraint[end].0 == hash {
+                end += 1;
+            }
+            if end - start == 1 {
+                entries.push(((hash, None), by_constraint[start].1));
+            } else {
+                let run_start = entries.len();
+                for &(_, j) in &by_constraint[start..end] {
+                    let p = self.objective.p.column(j);
+                    let key = (!p.is_empty()).then(|| packed(fingerprint(p.iter().copied())));
+                    entries.push(((hash, key), j));
+                }
+                entries[run_start..].sort_unstable();
+            }
+            start = end;
+        }
         let mut comparisons = 0;
         for (start, end) in runs(&entries) {
             let group = &entries[start..end];
@@ -367,6 +400,9 @@ impl Model {
         }
         if self.settings.rules.dominated_columns {
             comparisons += self.dominated_support_groups(&entries)?;
+        }
+        if self.revision == input {
+            self.parallel_columns_seen = input;
         }
         Ok(comparisons)
     }

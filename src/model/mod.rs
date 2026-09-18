@@ -57,6 +57,13 @@ pub(crate) struct Model {
     /// unchanged row then reuse one copy instead of taking one per round.
     equations: Vec<Option<Arc<Equation>>>,
     pub revision: usize,
+    /// Bumped by every row-domain or matrix edit, but not by variable-bound
+    /// changes; the parallel-row scan reads nothing else.
+    pub rows_revision: usize,
+    /// Revision at which the last fruitless parallel-row / parallel-column
+    /// scan ran, so an exact repeat on an unchanged model is skipped.
+    pub parallel_rows_seen: usize,
+    pub parallel_columns_seen: usize,
     /// Run configuration, applied once by `configure`.
     pub settings: crate::settings::Settings,
     pub dual_scratch: crate::rules::dual_propagation::DualScratch,
@@ -195,6 +202,9 @@ impl Model {
             row_kinds,
             equations: vec![None; m],
             revision: 0,
+            rows_revision: 0,
+            parallel_rows_seen: usize::MAX,
+            parallel_columns_seen: usize::MAX,
             settings: crate::settings::Settings::default(),
             dual_scratch: Default::default(),
             dominated_scratch: Default::default(),
@@ -292,6 +302,7 @@ impl Model {
 
     #[inline]
     fn changed_row(&mut self, row: usize) {
+        self.rows_revision += 1;
         let domain = self.rows[row];
         if let RowDomain::Cone { block, .. } = domain {
             self.changed_cones.push(block);

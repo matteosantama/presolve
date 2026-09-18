@@ -242,7 +242,11 @@ impl Model {
                 }
                 let run = &entries[start..end];
                 start = end;
-                if run.len() < 2 || run.iter().any(|(key, _)| key.1.is_some()) {
+                if run.len() < 2
+                    || run
+                        .iter()
+                        .any(|&(_, j)| !self.objective.p.column(j).is_empty())
+                {
                     continue;
                 }
                 for (at, &(_, j)) in run.iter().enumerate() {
