@@ -166,10 +166,8 @@ impl LinkedMatrix {
                 out.lists[0][row].len += 1;
             }
         });
-        let mut offsets = Vec::with_capacity(rows);
         let mut nnz = 0;
         for list in &mut out.lists[0] {
-            offsets.push(nnz);
             if list.len != 0 {
                 list.head = u32::try_from(nnz).unwrap();
                 list.tail = u32::try_from(nnz + list.len as usize - 1).unwrap();
@@ -177,6 +175,7 @@ impl LinkedMatrix {
             nnz += list.len as usize;
         }
         assert!(nnz < NONE as usize);
+        let mut offsets: Vec<u32> = out.lists[0].iter().map(|list| list.head).collect();
         out.nodes = vec![
             Node {
                 value: 0.0,
@@ -187,33 +186,35 @@ impl LinkedMatrix {
             };
             nnz
         ];
-        visit(columns, &column, |row, col, value| {
-            if value == 0.0 {
-                return;
+        // The next nonzero of the same column is placed at its row's current
+        // offset, since nothing else is placed in between, so each node is
+        // written once with all four links and no earlier node is revisited.
+        for col in 0..columns {
+            let mut entries = column(col).filter(|&(_, v)| v != 0.0).peekable();
+            let mut tail = NONE;
+            let mut len = 0;
+            while let Some((row, value)) = entries.next() {
+                let id = offsets[row];
+                offsets[row] += 1;
+                let row_list = out.lists[0][row];
+                let next = entries.peek().map_or(NONE, |&(r, _)| offsets[r]);
+                out.nodes[id as usize] = Node {
+                    value,
+                    row: row as u32,
+                    col: col as u32,
+                    prev: [if id == row_list.head { NONE } else { id - 1 }, tail],
+                    next: [if id == row_list.tail { NONE } else { id + 1 }, next],
+                };
+                if tail == NONE {
+                    out.lists[1][col].head = id;
+                }
+                tail = id;
+                len += 1;
             }
-            let id = offsets[row] as u32;
-            offsets[row] += 1;
-            let row_list = out.lists[0][row];
-            let col_list = &mut out.lists[1][col];
-            out.nodes[id as usize] = Node {
-                value,
-                row: row as u32,
-                col: col as u32,
-                prev: [
-                    if id == row_list.head { NONE } else { id - 1 },
-                    col_list.tail,
-                ],
-                next: [if id == row_list.tail { NONE } else { id + 1 }, NONE],
-            };
-            if col_list.tail == NONE {
-                col_list.head = id;
-            } else {
-                out.nodes[col_list.tail as usize].next[1] = id;
-            }
-            col_list.tail = id;
-            col_list.len += 1;
-            out.column_cursors[col] = id;
-        });
+            out.lists[1][col].tail = tail;
+            out.lists[1][col].len = len;
+            out.column_cursors[col] = tail;
+        }
         out.nnz = nnz;
         for list in &out.lists[1] {
             if list.len == 1 {
@@ -230,6 +231,14 @@ impl LinkedMatrix {
     }
     pub fn nnz(&self) -> usize {
         self.nnz
+    }
+    /// Every entry in arena order, which is row order right after
+    /// construction. Only valid while no node has been released.
+    pub fn storage_entries(&self) -> impl Iterator<Item = (usize, usize, f64)> + '_ {
+        assert_eq!(self.free, NONE, "arena has released nodes");
+        self.nodes
+            .iter()
+            .map(|node| (node.row as usize, node.col as usize, node.value))
     }
     /// Pack `rows`, in that order, into CSC over the compact columns given by
     /// `stable_to_compact` (`usize::MAX` marks a removed column). Column list

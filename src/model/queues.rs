@@ -17,6 +17,14 @@ impl Worklist {
         }
     }
 
+    /// For a list that construction fills completely.
+    pub fn with_capacity(size: usize) -> Self {
+        Self {
+            entries: Vec::with_capacity(size),
+            queued: vec![false; size],
+        }
+    }
+
     #[inline]
     pub fn push(&mut self, index: usize) {
         if index >= self.queued.len() {
@@ -93,10 +101,11 @@ const SINGLETON: u8 = 2;
 
 impl ActivityRows {
     pub fn new(rows: usize) -> Self {
+        // Construction pushes every row once; later rounds size themselves.
         Self {
             flags: vec![0; rows],
-            propagation: Vec::new(),
-            singleton: Vec::new(),
+            propagation: Vec::with_capacity(rows),
+            singleton: Vec::with_capacity(rows),
         }
     }
 
@@ -159,7 +168,7 @@ impl Queues {
             singleton_columns: Worklist::new(columns),
             changed_activities: ActivityRows::new(rows),
             fixed_columns: Worklist::new(columns),
-            unlocked_columns: Worklist::new(columns),
+            unlocked_columns: Worklist::with_capacity(columns),
         }
     }
 

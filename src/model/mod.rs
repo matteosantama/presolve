@@ -153,18 +153,46 @@ impl Model {
     ) -> Self {
         let n = bounds.len();
         let m = rows.len();
+        // Lock counts are order independent, so sweep the arena in storage
+        // order rather than chasing row links. The row seeding mirrors
+        // `changed_row` without rewriting the freshly initialised caches;
+        // push order per queue is the same.
+        let mut locks = vec![Locks::default(); n];
+        for (row, col, value) in a.storage_entries() {
+            locks[col].add(Locks::contribution(value, rows[row]));
+        }
+        let mut queues = Queues::new(m, n);
+        let mut changed_cones = crate::model::queues::Worklist::new(0);
+        let mut row_kinds = vec![row_kind::OTHER; m];
+        for i in 0..m {
+            let domain = rows[i];
+            if let RowDomain::Cone { block, .. } = domain {
+                changed_cones.push(block);
+            }
+            let length = a.row(i).len();
+            let equality = matches!(domain, RowDomain::Linear(b) if b.equality());
+            row_kinds[i] = match domain {
+                RowDomain::Cone { .. } => row_kind::CONE,
+                RowDomain::Linear(_) if equality && length == 2 => row_kind::DOUBLETON_EQUALITY,
+                RowDomain::Linear(_) if equality && length >= 3 => row_kind::LONGER_EQUALITY,
+                _ => row_kind::OTHER,
+            };
+            if domain != RowDomain::Deleted {
+                queues.row_changed(i, length, equality);
+            }
+        }
         let mut model = Self {
             a,
             objective,
             rows,
             bounds,
             alive: vec![true; n],
-            locks: vec![Locks::default(); n],
-            queues: Queues::new(m, n),
+            locks,
+            queues,
             postsolve: RecoveryTape::default(),
             activities: vec![stale(); m],
             row_scratch: Vec::new(),
-            row_kinds: vec![row_kind::OTHER; m],
+            row_kinds,
             equations: vec![None; m],
             revision: 0,
             settings: crate::settings::Settings::default(),
@@ -176,14 +204,8 @@ impl Model {
             deadline: None,
             cones: vec![],
             cone_rows: vec![],
-            changed_cones: crate::model::queues::Worklist::new(0),
+            changed_cones,
         };
-        for i in 0..m {
-            for (j, a) in model.a.row(i) {
-                model.locks[j].add(Locks::contribution(a, model.rows[i]));
-            }
-            model.changed_row(i);
-        }
         for j in 0..n {
             model.column_changed(j);
             if model.bounds[j].equality() {
