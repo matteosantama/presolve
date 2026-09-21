@@ -27,12 +27,19 @@ impl Worklist {
 
     #[inline]
     pub fn push(&mut self, index: usize) {
+        if self.queued.get(index).copied().unwrap_or(false) {
+            return;
+        }
+        self.push_new(index);
+    }
+
+    #[inline(never)]
+    fn push_new(&mut self, index: usize) {
         if index >= self.queued.len() {
             self.queued.resize(index + 1, false);
         }
-        if !std::mem::replace(&mut self.queued[index], true) {
-            self.entries.push(index);
-        }
+        self.queued[index] = true;
+        self.entries.push(index);
     }
 
     #[inline]
@@ -112,6 +119,9 @@ impl ActivityRows {
     #[inline]
     pub fn push(&mut self, row: usize) {
         let flags = self.flags[row];
+        if flags == PROPAGATION | SINGLETON {
+            return;
+        }
         if flags & PROPAGATION == 0 {
             self.propagation.push(row);
         }
@@ -245,5 +255,18 @@ mod tests {
         assert_eq!(rows.take_round(), [0, 3]);
         assert!(rows.take_round().is_empty());
         assert!(rows.take_singleton_round().is_empty());
+    }
+
+    #[test]
+    fn duplicate_pushes_preserve_order_after_growing_the_index_space() {
+        let mut queue = Worklist::new(1);
+        for index in [0, 4096, 0, 2, 4096, 2] {
+            queue.push(index);
+        }
+        assert_eq!(queue.take_round(), [0, 4096, 2]);
+        queue.push(4096);
+        queue.push(4096);
+        assert_eq!(queue.pop(), Some(4096));
+        assert_eq!(queue.pop(), None);
     }
 }

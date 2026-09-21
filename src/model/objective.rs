@@ -3,7 +3,7 @@
 //! Sparse quadratic objective updates under affine transformations.
 //! Every affine substitution applies P' = T^T P T, c' = T^T(c+P d).
 
-use crate::matrix::sparse::{Entries, SymmetricMatrix};
+use crate::matrix::sparse::{Coefficient, Entries, SymmetricMatrix};
 use std::time::Instant;
 
 #[derive(Clone, Copy, Debug)]
@@ -44,6 +44,7 @@ pub(crate) struct Scratch {
     slope_indices: Vec<usize>,
     linear: Entries,
     quadratic: Vec<(usize, usize, f64)>,
+    values: Vec<(Coefficient, f64)>,
 }
 impl Scratch {
     fn clear(&mut self) {
@@ -52,6 +53,7 @@ impl Scratch {
         self.slope_indices.clear();
         self.linear.clear();
         self.quadratic.clear();
+        self.values.clear();
     }
 }
 
@@ -183,7 +185,7 @@ impl Objective {
                             row = self.p.upper_row(a.column);
                         }
                         previous = Some(b.column);
-                        let old = row.advance_to(b.column);
+                        let (old, coefficient) = row.advance_to_entry(b.column);
                         // Each unordered candidate occurs once in each pass. Reject
                         // excessive fill before staging updates to existing positions.
                         if (old == 0.0) != missing {
@@ -206,7 +208,13 @@ impl Objective {
                             removed += count;
                         }
                         if value != old {
-                            scratch.quadratic.push((a.column, b.column, value));
+                            if value != 0.0
+                                && let Some(coefficient) = coefficient
+                            {
+                                scratch.values.push((coefficient, value));
+                            } else {
+                                scratch.quadratic.push((a.column, b.column, value));
+                            }
                         }
                         Ok(())
                     }
@@ -241,6 +249,9 @@ impl Objective {
             if scratch.linear.iter().any(|e| !e.1.is_finite()) {
                 return Err(SubstitutionFailure::Numerical);
             }
+            // No affected pair contains k. Update live slots before deleting k
+            // or inserting/cancelling entries, any of which may compact the arena.
+            self.p.update_values(&scratch.values);
             self.p.remove_variable(k);
             self.c[k] = 0.0;
             for &(j, c) in &scratch.linear {
@@ -592,6 +603,63 @@ mod tests {
                     value(&objective, &[0.0, y, z])
                 );
             }
+        }
+    }
+    #[test]
+    fn repeated_substitutions_preserve_coefficients_across_arena_compaction() {
+        let n = 80;
+        let mut dense: Vec<f64> = (0..n)
+            .flat_map(|i| {
+                (0..n).map(move |j| {
+                    let a = (i % 7) as f64 - 3.;
+                    let b = (j % 7) as f64 - 3.;
+                    a * b + if i == j { 1. } else { 0. }
+                })
+            })
+            .collect();
+        let mut objective = Objective {
+            p: SymmetricMatrix::from_matrix(
+                &crate::matrix::test_matrix(n, n, dense.clone()).unwrap(),
+            ),
+            c: vec![0.; n],
+            constant: 0.,
+            scratch: Default::default(),
+        };
+        for k in 0..65 {
+            let slopes = [(k + 1, -0.5), (k + 2, 0.25)];
+            objective
+                .try_substitute(k, 0., &slopes, usize::MAX, true, None)
+                .unwrap();
+            let mut next = vec![0.; n * n];
+            let slope = |j| {
+                if j == k + 1 {
+                    -0.5
+                } else if j == k + 2 {
+                    0.25
+                } else {
+                    0.
+                }
+            };
+            for i in k + 1..n {
+                for j in i..n {
+                    let expected = dense[i * n + j]
+                        + dense[i * n + k] * slope(j)
+                        + slope(i) * dense[k * n + j]
+                        + dense[k * n + k] * slope(i) * slope(j);
+                    next[i * n + j] = expected;
+                    next[j * n + i] = expected;
+                }
+            }
+            for i in 0..n {
+                for j in 0..n {
+                    assert_eq!(
+                        objective.p.get(i, j),
+                        next[i * n + j],
+                        "pivot {k}, ({i}, {j})"
+                    );
+                }
+            }
+            dense = next;
         }
     }
 }

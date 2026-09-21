@@ -32,6 +32,12 @@ pub(crate) enum RowDomain {
     Deleted,
 }
 
+#[derive(Default)]
+struct SubstitutionScratch {
+    entries: Entries,
+    rows: Vec<(usize, usize, usize, RowDomain)>,
+}
+
 pub(crate) struct Model {
     pub a: LinkedMatrix,
     pub objective: Objective,
@@ -48,6 +54,8 @@ pub(crate) struct Model {
     /// Previous coefficients of the row being replaced, kept between calls
     /// so row edits do not allocate a fresh copy each time.
     row_scratch: Entries,
+    /// Contiguous staging storage reused across accepted and rejected substitutions.
+    substitution_scratch: SubstitutionScratch,
     /// One `RowKind` byte per row, refreshed by `changed_row`. A bound change
     /// visits every incident row's queue eligibility; the byte replaces reads
     /// of the wider domain and list-header arrays for that decision.
@@ -200,6 +208,7 @@ impl Model {
             postsolve: RecoveryTape::default(),
             activities: vec![stale(); m],
             row_scratch: Vec::new(),
+            substitution_scratch: SubstitutionScratch::default(),
             row_kinds,
             equations: vec![None; m],
             revision: 0,
@@ -375,14 +384,12 @@ impl Model {
             } else {
                 self.locks[j].remove(removed);
             }
-        }
-        for &(k, b) in &entries[next..] {
-            self.locks[k].add(Locks::contribution(b, domain));
-        }
-        for &(j, _) in &old {
             if self.alive[j] {
                 self.column_changed(j);
             }
+        }
+        for &(k, b) in &entries[next..] {
+            self.locks[k].add(Locks::contribution(b, domain));
         }
         let mut next = 0;
         for &(j, _) in entries {
@@ -415,6 +422,7 @@ impl Model {
         self.postsolve.rules.push(Rule::DeletedRow(row));
     }
 
+    #[inline]
     fn column_changed(&mut self, j: usize) {
         self.queues.column_changed(j, self.a.column(j).len());
     }
@@ -633,144 +641,153 @@ impl Model {
         effective_bounds: Bounds,
         max_fill: usize,
     ) -> bool {
-        use self::objective::SubstitutionFailure;
-        self.substitution_failure = SubstitutionFailure::Numerical;
-        let row = equation.row;
-        let pivot = self.a.get(row, column);
-        if pivot == 0.0 {
-            return false;
-        }
-        let offset = equation.bounds.lower / pivot;
-        let slopes: Entries = equation
-            .entries
-            .iter()
-            .filter(|&&(j, _)| j != column)
-            .map(|&(j, a)| (j, -a / pivot))
-            .collect();
-        if !offset.is_finite() || slopes.iter().any(|&(_, v)| !v.is_finite()) {
-            return false;
-        }
-        let remaining: Entries = equation
-            .entries
-            .iter()
-            .copied()
-            .filter(|&(j, _)| j != column)
-            .collect();
-        let retained = effective_bounds != Bounds::FREE;
-        let domain = if retained {
-            let (l, u) = if pivot > 0.0 {
-                (effective_bounds.upper, effective_bounds.lower)
-            } else {
-                (effective_bounds.lower, effective_bounds.upper)
-            };
-            let l_new = equation.bounds.lower - pivot * l;
-            let u_new = equation.bounds.upper - pivot * u;
-            if (l.is_finite() && !l_new.is_finite()) || (u.is_finite() && !u_new.is_finite()) {
+        let mut scratch = std::mem::take(&mut self.substitution_scratch);
+        scratch.entries.clear();
+        scratch.rows.clear();
+        let result = (|| {
+            use self::objective::SubstitutionFailure;
+            self.substitution_failure = SubstitutionFailure::Numerical;
+            let row = equation.row;
+            let pivot = self.a.get(row, column);
+            if pivot == 0.0 {
                 return false;
             }
-            RowDomain::Linear(Bounds {
-                lower: l_new,
-                upper: u_new,
-            })
-        } else {
-            RowDomain::Deleted
-        };
-        let other_rows: Entries = self
-            .a
-            .column(column)
-            .iter()
-            .filter(|&(i, _)| i != row)
-            .collect();
-        let mut fill = 0;
-        let mut updates = Vec::with_capacity(other_rows.len());
-        for &(i, a) in &other_rows {
-            if self
-                .deadline
-                .is_some_and(|deadline| Instant::now() >= deadline)
-            {
-                self.substitution_failure = SubstitutionFailure::Deadline;
-                return false;
-            }
-            let Some(domain) = shifted(self.rows[i], a * offset) else {
-                return false;
-            };
-            // Merge the existing row and sorted substitution slopes directly.
-            // Each old coefficient is read once, with no matrix searches.
-            let mut original = self
-                .a
-                .row(i)
+            let offset = equation.bounds.lower / pivot;
+            let slopes: Entries = equation
+                .entries
                 .iter()
+                .filter(|&&(j, _)| j != column)
+                .map(|&(j, a)| (j, -a / pivot))
+                .collect();
+            if !offset.is_finite() || slopes.iter().any(|&(_, v)| !v.is_finite()) {
+                return false;
+            }
+            let remaining: Entries = equation
+                .entries
+                .iter()
+                .copied()
                 .filter(|&(j, _)| j != column)
-                .peekable();
-            let mut changes = slopes.iter().copied().peekable();
-            let mut entries = Vec::with_capacity(self.a.row(i).len() + slopes.len());
-            while original.peek().is_some() || changes.peek().is_some() {
-                let old_column = original.peek().map_or(usize::MAX, |e| e.0);
-                let changed_column = changes.peek().map_or(usize::MAX, |e| e.0);
-                if old_column < changed_column {
-                    entries.push(original.next().unwrap());
-                    continue;
-                }
-                let (j, v) = changes.next().unwrap();
-                let old = if old_column == j {
-                    original.next().unwrap().1
+                .collect();
+            let retained = effective_bounds != Bounds::FREE;
+            let domain = if retained {
+                let (l, u) = if pivot > 0.0 {
+                    (effective_bounds.upper, effective_bounds.lower)
                 } else {
-                    0.0
+                    (effective_bounds.lower, effective_bounds.upper)
                 };
-                let change = a * v;
-                let value = old + change;
-                // Do not turn cancellation roundoff into a tiny pivot in a
-                // later equality. Reject the whole substitution transaction;
-                // exact cancellations remain valid structural zeros.
-                if !value.is_finite()
-                    || (value != 0.0 && value.abs() < 1e-10 * old.abs().max(change.abs()))
-                {
+                let l_new = equation.bounds.lower - pivot * l;
+                let u_new = equation.bounds.upper - pivot * u;
+                if (l.is_finite() && !l_new.is_finite()) || (u.is_finite() && !u_new.is_finite()) {
                     return false;
                 }
-                if value != 0.0 && old == 0.0 {
-                    fill += 1;
-                    if fill > max_fill {
-                        self.substitution_failure = SubstitutionFailure::ConstraintFill;
+                RowDomain::Linear(Bounds {
+                    lower: l_new,
+                    upper: u_new,
+                })
+            } else {
+                RowDomain::Deleted
+            };
+            let other_rows: Entries = self
+                .a
+                .column(column)
+                .iter()
+                .filter(|&(i, _)| i != row)
+                .collect();
+            let mut fill = 0;
+            scratch.rows.reserve(other_rows.len());
+            for &(i, a) in &other_rows {
+                if self
+                    .deadline
+                    .is_some_and(|deadline| Instant::now() >= deadline)
+                {
+                    self.substitution_failure = SubstitutionFailure::Deadline;
+                    return false;
+                }
+                let Some(domain) = shifted(self.rows[i], a * offset) else {
+                    return false;
+                };
+                // Merge the existing row and sorted substitution slopes directly.
+                // Each old coefficient is read once, with no matrix searches.
+                let mut original = self
+                    .a
+                    .row(i)
+                    .iter()
+                    .filter(|&(j, _)| j != column)
+                    .peekable();
+                let mut changes = slopes.iter().copied().peekable();
+                let entries = &mut scratch.entries;
+                let start = entries.len();
+                entries.reserve(self.a.row(i).len() + slopes.len());
+                while original.peek().is_some() || changes.peek().is_some() {
+                    let old_column = original.peek().map_or(usize::MAX, |e| e.0);
+                    let changed_column = changes.peek().map_or(usize::MAX, |e| e.0);
+                    if old_column < changed_column {
+                        entries.push(original.next().unwrap());
+                        continue;
+                    }
+                    let (j, v) = changes.next().unwrap();
+                    let old = if old_column == j {
+                        original.next().unwrap().1
+                    } else {
+                        0.0
+                    };
+                    let change = a * v;
+                    let value = old + change;
+                    // Do not turn cancellation roundoff into a tiny pivot in a
+                    // later equality. Reject the whole substitution transaction;
+                    // exact cancellations remain valid structural zeros.
+                    if !value.is_finite()
+                        || (value != 0.0 && value.abs() < 1e-10 * old.abs().max(change.abs()))
+                    {
                         return false;
                     }
+                    if value != 0.0 && old == 0.0 {
+                        fill += 1;
+                        if fill > max_fill {
+                            self.substitution_failure = SubstitutionFailure::ConstraintFill;
+                            return false;
+                        }
+                    }
+                    if value != 0.0 {
+                        entries.push((j, value));
+                    }
                 }
-                if value != 0.0 {
-                    entries.push((j, value));
+                scratch.rows.push((i, start, entries.len(), domain));
+            }
+            let gradient = match self.objective.try_substitute(
+                column,
+                offset,
+                &slopes,
+                max_fill - fill,
+                self.settings.allow_hessian_growth,
+                self.deadline,
+            ) {
+                Ok(gradient) => gradient,
+                Err(reason) => {
+                    self.substitution_failure = reason;
+                    return false;
                 }
+            };
+            for &(j, _) in gradient.terms.iter().chain(&slopes) {
+                self.column_changed(j);
             }
-            updates.push((i, entries, domain));
-        }
-        let gradient = match self.objective.try_substitute(
-            column,
-            offset,
-            &slopes,
-            max_fill - fill,
-            self.settings.allow_hessian_growth,
-            self.deadline,
-        ) {
-            Ok(gradient) => gradient,
-            Err(reason) => {
-                self.substitution_failure = reason;
-                return false;
+            self.alive[column] = false;
+            for &(i, start, end, domain) in &scratch.rows {
+                self.replace_row(i, &scratch.entries[start..end], domain);
             }
-        };
-        for &(j, _) in gradient.terms.iter().chain(&slopes) {
-            self.column_changed(j);
-        }
-        self.alive[column] = false;
-        for (i, entries, domain) in updates {
-            self.replace_row(i, &entries, domain);
-        }
-        self.replace_row(row, if retained { &remaining } else { &[] }, domain);
-        self.postsolve.rules.push(Rule::Substituted {
-            column,
-            equation,
-            gradient,
-            other_rows,
-            retained,
-        });
-        self.revision += 1;
-        true
+            self.replace_row(row, if retained { &remaining } else { &[] }, domain);
+            self.postsolve.rules.push(Rule::Substituted {
+                column,
+                equation,
+                gradient,
+                other_rows,
+                retained,
+            });
+            self.revision += 1;
+            true
+        })();
+        self.substitution_scratch = scratch;
+        result
     }
 
     /// Row sides change locks and eligibility, but not matrix coefficients.
@@ -943,5 +960,68 @@ impl Model {
             rows,
         });
         self.revision += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::matrix::sparse::SymmetricMatrix;
+
+    #[test]
+    fn rejected_row_staging_is_cleared_before_subsequent_substitutions() {
+        let dense = [[1., 1., 1., 0.], [1., 2., 2., 0.], [1., 0., 0., 1.]];
+        let a = LinkedMatrix::from_columns(3, 4, |j| {
+            dense
+                .iter()
+                .enumerate()
+                .filter_map(move |(i, row)| (row[j] != 0.).then_some((i, row[j])))
+        });
+        let mut model = Model::from_parts(
+            a,
+            Objective {
+                p: SymmetricMatrix::zeros(4),
+                c: vec![1., 2., 3., 4.],
+                constant: 0.,
+                scratch: Default::default(),
+            },
+            [3., 5., 4.]
+                .map(|b| RowDomain::Linear(Bounds::fixed(b)))
+                .to_vec(),
+            vec![Bounds::FREE; 4],
+        );
+        let original: Vec<_> = (0..3).map(|i| model.a.row(i).to_vec()).collect();
+        let equation = model.equation(0).unwrap();
+        assert!(!model.substitute_equation(0, Arc::clone(&equation), Bounds::FREE, 0));
+        assert!(matches!(
+            model.substitution_failure,
+            objective::SubstitutionFailure::ConstraintFill
+        ));
+        assert_eq!(
+            (0..3).map(|i| model.a.row(i).to_vec()).collect::<Vec<_>>(),
+            original
+        );
+        assert_eq!(model.objective.c, [1., 2., 3., 4.]);
+        assert!(model.alive.iter().all(|&v| v));
+        model.deadline = Some(Instant::now());
+        assert!(!model.substitute_equation(0, Arc::clone(&equation), Bounds::FREE, usize::MAX));
+        assert!(matches!(
+            model.substitution_failure,
+            objective::SubstitutionFailure::Deadline
+        ));
+        model.deadline = None;
+        assert!(model.substitute_equation(0, equation, Bounds::FREE, usize::MAX));
+        assert!(model.a.row(0).is_empty());
+        assert_eq!(model.a.row(1).to_vec(), [(1, 1.), (2, 1.)]);
+        assert_eq!(model.a.row(2).to_vec(), [(1, -1.), (2, -1.), (3, 1.)]);
+        assert_eq!(model.objective.c, [0., 1., 2., 4.]);
+        assert_eq!(model.objective.constant, 3.);
+        let equation = model.equation(1).unwrap();
+        assert!(model.substitute_equation(2, equation, Bounds::FREE, usize::MAX));
+        assert!(model.a.row(1).is_empty());
+        assert_eq!(model.a.row(2).to_vec(), [(3, 1.)]);
+        assert_eq!(model.rows[2], RowDomain::Linear(Bounds::fixed(3.)));
+        assert_eq!(model.objective.c, [0., -1., 0., 4.]);
+        assert_eq!(model.objective.constant, 7.);
     }
 }

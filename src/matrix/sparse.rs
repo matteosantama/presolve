@@ -8,6 +8,10 @@ use crate::matrix::CscMatrix;
 pub(crate) type Entries = Vec<(usize, f64)>;
 const NONE: u32 = u32::MAX;
 
+/// Valid until a structural edit removes or renumbers coefficient slots.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Coefficient(u32);
+
 // Row degrees fit the public u32 dimension limit. Arena offsets remain usize
 // because spare capacity and released slots can exceed the live nonzero count.
 #[derive(Clone, Copy, Debug, Default)]
@@ -89,10 +93,16 @@ pub(crate) struct Iter<'a> {
     diagonal: f64,
 }
 impl Iter<'_> {
+    #[inline]
+    #[cfg(test)]
+    pub fn advance_to(&mut self, column: usize) -> f64 {
+        self.advance_to_entry(column).0
+    }
     /// Look up nondecreasing columns, skipping support indices without fetching
     /// their coefficients. Recreate the cursor before a backwards request.
+    /// Only existing off-diagonal entries have a coefficient handle.
     #[inline]
-    pub fn advance_to(&mut self, column: usize) -> f64 {
+    pub fn advance_to_entry(&mut self, column: usize) -> (f64, Option<Coefficient>) {
         while self
             .entries
             .as_slice()
@@ -102,7 +112,7 @@ impl Iter<'_> {
             self.entries.next();
         }
         if column == self.row {
-            return self.diagonal;
+            return (self.diagonal, None);
         }
         if column > self.row {
             self.diagonal = 0.0;
@@ -111,7 +121,12 @@ impl Iter<'_> {
             .as_slice()
             .first()
             .filter(|link| link.column as usize == column)
-            .map_or(0.0, |link| self.values[link.coefficient as usize])
+            .map_or((0.0, None), |link| {
+                (
+                    self.values[link.coefficient as usize],
+                    Some(Coefficient(link.coefficient)),
+                )
+            })
     }
 }
 impl Iterator for Iter<'_> {
@@ -279,6 +294,17 @@ impl SymmetricMatrix {
             self.values[self.entries[self.slots[row].start + at].coefficient as usize]
         })
     }
+    /// Apply only nonzero-to-nonzero changes. Handles must come from this matrix,
+    /// with no intervening structural edits that remove or renumber their slots.
+    pub fn update_values(&mut self, updates: &[(Coefficient, f64)]) {
+        for &(Coefficient(id), value) in updates {
+            debug_assert!(value.is_finite() && value != 0.0);
+            debug_assert!(self.values[id as usize] != 0.0);
+            self.values[id as usize] = value;
+        }
+        self.revision += updates.len();
+    }
+
     pub fn set(&mut self, row: usize, column: usize, value: f64) {
         assert!(value.is_finite());
         if row == column {

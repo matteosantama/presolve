@@ -214,6 +214,22 @@ impl Activity {
 
     #[inline]
     pub fn replace_bound(&mut self, a: f64, old: Bounds, new: Bounds) -> bool {
+        if old.lower == new.lower {
+            let extreme = if a > 0.0 {
+                &mut self.max
+            } else {
+                &mut self.min
+            };
+            return extreme.replace(a * old.upper, a * new.upper);
+        }
+        if old.upper == new.upper {
+            let extreme = if a > 0.0 {
+                &mut self.min
+            } else {
+                &mut self.max
+            };
+            return extreme.replace(a * old.lower, a * new.lower);
+        }
         let (old_min, old_max) = Self::terms(a, old);
         let (new_min, new_max) = Self::terms(a, new);
         self.min.replace(old_min, new_min) && self.max.replace(old_max, new_max)
@@ -404,6 +420,66 @@ mod tests {
                     scalar.max.infinite
                 )
             );
+        }
+    }
+    #[test]
+    fn single_bound_updates_match_the_two_extreme_reference() {
+        let domains = [
+            Bounds::FREE,
+            Bounds::fixed(0.),
+            Bounds::fixed(1.),
+            Bounds {
+                lower: 0.,
+                upper: f64::INFINITY,
+            },
+            Bounds {
+                lower: f64::NEG_INFINITY,
+                upper: 0.,
+            },
+            Bounds {
+                lower: -2.,
+                upper: 3.,
+            },
+            Bounds {
+                lower: -2.,
+                upper: 4.,
+            },
+            Bounds {
+                lower: -1.,
+                upper: 3.,
+            },
+            Bounds {
+                lower: -f64::MAX,
+                upper: f64::MAX,
+            },
+        ];
+        for a in [
+            -f64::MAX,
+            -2.,
+            -f64::MIN_POSITIVE,
+            f64::MIN_POSITIVE,
+            2.,
+            f64::MAX,
+        ] {
+            for old in domains {
+                for new in domains {
+                    let initial =
+                        Activity::compute([(0, a), (1, 1.)], &[old, Bounds::fixed(1e300)]);
+                    let mut reference = initial;
+                    let (old_min, old_max) = Activity::terms(a, old);
+                    let (new_min, new_max) = Activity::terms(a, new);
+                    let expected = reference.min.replace(old_min, new_min)
+                        && reference.max.replace(old_max, new_max);
+                    let mut actual = initial;
+                    assert_eq!(actual.replace_bound(a, old, new), expected);
+                    if expected {
+                        assert_eq!(actual.min.sum.to_bits(), reference.min.sum.to_bits());
+                        assert_eq!(actual.max.sum.to_bits(), reference.max.sum.to_bits());
+                        assert_eq!(actual.min.infinite, reference.min.infinite);
+                        assert_eq!(actual.max.infinite, reference.max.infinite);
+                    }
+                }
+            }
         }
     }
 }
