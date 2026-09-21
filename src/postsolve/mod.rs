@@ -23,6 +23,43 @@ pub struct Workspace {
     slacks: Vec<f64>,
 }
 
+/// Original-coordinate solution borrowed from a recovery workspace.
+///
+/// Primal variables and bound multipliers are contiguous slices. Linear and
+/// conic rows are gathered lazily in their original block order, with the same
+/// signs as [`Solution`]. No result buffers are allocated or copied. The view
+/// must be released before the workspace can be reused.
+pub struct RecoveredSolution<'a> {
+    point: &'a Point,
+    slacks: &'a [f64],
+    original: OriginalMap<'a>,
+}
+
+impl<'a> RecoveredSolution<'a> {
+    pub fn x(&self) -> &'a [f64] {
+        &self.point.x[..self.original.columns]
+    }
+
+    pub fn z(&self) -> &'a [f64] {
+        &self.point.z[..self.original.columns]
+    }
+
+    pub fn y(&self) -> impl ExactSizeIterator<Item = f64> + 'a {
+        let y = &self.point.y;
+        self.original.linear.iter().map(move |&i| y[i])
+    }
+
+    pub fn conic_dual(&self) -> impl ExactSizeIterator<Item = f64> + 'a {
+        let y = &self.point.y;
+        self.original.conic.iter().map(move |&i| -y[i])
+    }
+
+    pub fn conic_slack(&self) -> impl ExactSizeIterator<Item = f64> + 'a {
+        let slacks = self.slacks;
+        self.original.conic.iter().map(move |&i| slacks[i])
+    }
+}
+
 #[derive(Debug)]
 pub struct Postsolve {
     pub(crate) tape: RecoveryTape,
@@ -178,6 +215,20 @@ impl Postsolve {
     /// Recover into reusable caller buffers without allocating. Dimensions and
     /// workspace compatibility are the caller's responsibility.
     pub fn recover_into(&self, point: SolutionRef<'_>, out: SolutionMut<'_>, work: &mut Workspace) {
+        let recovered = self.recover_borrowed(point, work);
+        recovered
+            .original
+            .gather_into(recovered.point, recovered.slacks, out);
+    }
+
+    /// Recover without copying the result out of the workspace. The workspace
+    /// must have been created by this postsolve map; input dimensions must match
+    /// the reduced problem, just as for [`Self::recover_into`].
+    pub fn recover_borrowed<'a>(
+        &'a self,
+        point: SolutionRef<'_>,
+        work: &'a mut Workspace,
+    ) -> RecoveredSolution<'a> {
         let p = &mut work.point;
         p.x.fill(0.);
         p.y.fill(0.);
@@ -194,7 +245,11 @@ impl Postsolve {
         }
         self.tape
             .recover_with_slacks(p, Recovery::Solution, &mut work.slacks);
-        self.original().gather_into(p, &work.slacks, out);
+        RecoveredSolution {
+            point: p,
+            slacks: &work.slacks,
+            original: self.original(),
+        }
     }
     /// Allocating convenience wrapper around `recover_into`.
     pub fn recover_solution(&self, point: SolutionRef<'_>) -> Solution {

@@ -619,6 +619,14 @@ adjust them for interiority. Forward warm starts can need solver refinement
 after redundant constraints are removed; they are not guaranteed to remain
 optimal or stationary.
 
+For repeated recovery, create a `Postsolve::workspace()` once and call
+`recover_borrowed(point, &mut workspace)`. The returned `RecoveredSolution`
+borrows primal and bound-multiplier slices and exposes iterators over linear
+duals, conic duals, and conic slacks in their original block order. These use
+the same signs as the owned `Solution`, without intermediate result copies.
+Release the view before reusing the workspace. `recover_into` and
+`recover_solution` remain available for callers that need owned output buffers.
+
 `Problem::into_conic()` expands ranged rows and bounds to `Ax + s = b` form
 and returns an additional map for translating conic-form multipliers into
 native coordinates before postsolve.
