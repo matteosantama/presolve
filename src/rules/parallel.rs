@@ -47,8 +47,7 @@ fn fingerprint<I: ExactSizeIterator<Item = (usize, f64)> + Clone>(mut entries: I
     let scale = f64x4::splat(max);
     let sign = f64x4::splat(sign);
     while entries.len() >= 4 {
-        // Stack packing works for both contiguous Hessian adjacency and
-        // linked matrix iterators without allocating or changing traversal.
+        // Stack packing works for both symmetric and linked matrix iterators without allocating or changing traversal.
         let block = std::array::from_fn::<_, 4, _>(|_| entries.next().unwrap());
         let values = f64x4::new(block.map(|(_, a)| a));
         let normalized = MILLION * (values / scale) * sign;
@@ -336,7 +335,7 @@ impl Model {
                 let run_start = entries.len();
                 for &(_, j) in &by_constraint[start..end] {
                     let p = self.objective.p.column(j);
-                    let key = (!p.is_empty()).then(|| packed(fingerprint(p.iter().copied())));
+                    let key = (!p.is_empty()).then(|| packed(fingerprint(p.iter())));
                     entries.push(((hash, key), j));
                 }
                 entries[run_start..].sort_unstable();
@@ -506,6 +505,33 @@ mod tests {
                 assert_eq!(
                     fingerprint(entries.iter().copied()),
                     scalar_fingerprint(entries.iter().copied())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fingerprints_match_on_shared_hessian_coefficients() {
+        use crate::matrix::sparse::SymmetricMatrix;
+        for n in [1, 2, 7, 8, 9, 15, 16, 17, 64, 129] {
+            let mut matrix = SymmetricMatrix::from_upper_columns(n, |j| {
+                (0..=j).map(move |i| (i, (1 + i + 7 * j) as f64))
+            });
+            // Deletion and reinsertion break coefficient locality while keeping
+            // support sorted, including diagonals and partial SIMD blocks.
+            for j in (0..n).step_by(2) {
+                matrix.remove_variable(j);
+            }
+            for j in (0..n).step_by(2) {
+                for i in 0..n {
+                    matrix.set(i, j, -((1 + i + j) as f64));
+                }
+            }
+            for j in 0..n {
+                let row = matrix.row(j);
+                assert_eq!(
+                    fingerprint(row.iter()),
+                    scalar_fingerprint(row.to_vec().into_iter())
                 );
             }
         }

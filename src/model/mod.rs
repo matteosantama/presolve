@@ -330,9 +330,15 @@ impl Model {
     #[inline]
     pub fn activity(&mut self, row: usize) -> Activity {
         if self.activities[row].min.infinite == STALE {
-            self.activities[row] = Activity::compute(self.a.row(row), &self.bounds);
+            self.recompute_activity(row);
         }
         self.activities[row]
+    }
+
+    // Keep the recomputation loop out of the frequently inlined cache-hit path.
+    #[inline(never)]
+    fn recompute_activity(&mut self, row: usize) {
+        self.activities[row] = Activity::compute(self.a.row(row), &self.bounds);
     }
 
     pub fn residual_activity(&self, row: usize, column: usize) -> Activity {
@@ -857,7 +863,7 @@ impl Model {
             self.locks[removed].remove(Locks::contribution(a, self.rows[i]));
             self.changed_row(i);
         }
-        for &(j, _) in self.objective.p.column(removed) {
+        for (j, _) in self.objective.p.column(removed) {
             self.queues.column_changed(j, self.a.column(j).len());
         }
         self.objective.aggregate(removed);
@@ -883,8 +889,8 @@ impl Model {
             .p
             .row(column)
             .iter()
-            .filter(|&&(k, _)| k != column)
-            .map(|&(k, p)| (k, -p / diagonal))
+            .filter(|&(k, _)| k != column)
+            .map(|(k, p)| (k, -p / diagonal))
             .collect();
         if !offset.is_finite() || slopes.iter().any(|&(_, s)| !s.is_finite()) {
             return false;

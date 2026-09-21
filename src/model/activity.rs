@@ -228,13 +228,39 @@ impl Activity {
     }
 
     pub fn compute(row: impl IntoIterator<Item = (usize, f64)>, bounds: &[Bounds]) -> Self {
-        let mut out = Self::default();
+        use wide::{f64x2, u64x2};
+        // One lane per extreme preserves the scalar accumulation order. Explicit
+        // masks keep nonfinite classification free of per-term constant setup.
+        const EXPONENT: u64x2 = u64x2::new([0x7ff0000000000000; 2]);
+        const ONE: u64x2 = u64x2::new([1; 2]);
+        let mut sums = f64x2::ZERO;
+        let mut infinite = u64x2::ZERO;
         for (j, a) in row {
-            let (min, max) = Self::terms(a, bounds[j]);
-            out.min.add(min);
-            out.max.add(max);
+            let b = bounds[j];
+            let coefficient = f64x2::splat(a);
+            let sides = coefficient.simd_gt(f64x2::ZERO).bitselect(
+                f64x2::new([b.lower, b.upper]),
+                f64x2::new([b.upper, b.lower]),
+            );
+            let terms = sides * coefficient;
+            let bits = u64x2::new(terms.to_array().map(f64::to_bits));
+            let nonfinite = (bits & EXPONENT).simd_eq(EXPONENT);
+            let finite = f64x2::new((!nonfinite).to_array().map(f64::from_bits));
+            sums += terms & finite;
+            infinite += nonfinite & ONE;
         }
-        out
+        let [min_sum, max_sum] = sums.to_array();
+        let [min_infinite, max_infinite] = infinite.to_array();
+        Self {
+            min: Extreme {
+                sum: min_sum,
+                infinite: min_infinite as usize,
+            },
+            max: Extreme {
+                sum: max_sum,
+                infinite: max_infinite as usize,
+            },
+        }
     }
     /// The activity without the term of column `exclude`.
     pub fn compute_excluding(
@@ -307,5 +333,77 @@ mod tests {
             ),
             Locks { up: 1, down: 0 }
         );
+    }
+
+    #[test]
+    fn paired_extremes_match_scalar_bits() {
+        let mut seed = 23781882u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for case in 0..3000 {
+            let n = case % 2048;
+            let mut row = Vec::with_capacity(n);
+            let mut bounds = Vec::with_capacity(n);
+            let mut scalar = Activity::default();
+            for j in 0..n {
+                let values = [
+                    -f64::INFINITY,
+                    -f64::MAX,
+                    -1e200,
+                    -1e-200,
+                    -1.0,
+                    -0.0,
+                    0.0,
+                    1e-200,
+                    1.0,
+                    1e200,
+                    f64::MAX,
+                    f64::INFINITY,
+                ];
+                let x = values[next() as usize % values.len()];
+                let y = values[next() as usize % values.len()];
+                let b = Bounds {
+                    lower: x.min(y),
+                    upper: x.max(y),
+                };
+                let coeffs = [
+                    -f64::MAX,
+                    -1e200,
+                    -1e-200,
+                    -1.0,
+                    -f64::MIN_POSITIVE,
+                    f64::MIN_POSITIVE,
+                    1e-200,
+                    1.0,
+                    1e200,
+                    f64::MAX,
+                ];
+                let a = coeffs[next() as usize % coeffs.len()];
+                row.push((j, a));
+                bounds.push(b);
+                let (min, max) = Activity::terms(a, b);
+                scalar.min.add(min);
+                scalar.max.add(max);
+            }
+            let paired = Activity::compute(row, &bounds);
+            assert_eq!(
+                (
+                    paired.min.sum.to_bits(),
+                    paired.min.infinite,
+                    paired.max.sum.to_bits(),
+                    paired.max.infinite
+                ),
+                (
+                    scalar.min.sum.to_bits(),
+                    scalar.min.infinite,
+                    scalar.max.sum.to_bits(),
+                    scalar.max.infinite
+                )
+            );
+        }
     }
 }
