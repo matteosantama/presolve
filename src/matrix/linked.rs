@@ -596,15 +596,80 @@ impl LinkedMatrix {
         for (row, entries) in updates {
             self.update_row::<false, true>(row, &entries, &mut Vec::new(), &mut touched);
         }
-        touched.sort_unstable();
-        touched.dedup();
+        // Large batches revisit columns many times. A dense marker scan
+        // avoids comparison-sorting those repeats, while small or sparse
+        // batches retain the allocation-free sort/dedup path.
+        if touched.len() >= 64 && touched.len() > self.lists[1].len() / 8 {
+            Self::deduplicate_dense_columns(&mut touched, self.lists[1].len());
+        } else {
+            touched.sort_unstable();
+            touched.dedup();
+        }
         touched
+    }
+
+    // Keep marker allocation and scanning out of the sparse mutation path.
+    #[inline(never)]
+    fn deduplicate_dense_columns(touched: &mut Vec<usize>, columns: usize) {
+        let mut seen = vec![false; columns];
+        for &j in touched.iter() {
+            seen[j] = true;
+        }
+        touched.clear();
+        touched.extend(
+            seen.iter()
+                .enumerate()
+                .filter_map(|(j, &present)| present.then_some(j)),
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn batch_replacements_return_exact_sorted_changed_columns_for_both_paths() {
+        // The same edits use the dense path with 256 columns and the sparse
+        // path with 8192. Repeated changes must not duplicate returned IDs.
+        for columns in [256, 8192] {
+            let mut a = LinkedMatrix::from_columns(3, columns, |j| {
+                (0..3).filter_map(move |i| (j < 256 && j % 2 == 0).then_some((i, 1.0)))
+            });
+            let next = |row| {
+                (0..256)
+                    .filter_map(|j| {
+                        if j == 1 && row == 0 {
+                            Some((j, 3.0)) // insert
+                        } else if j % 2 == 0 && !(j == 0 && row == 2) {
+                            Some((j, if j == 8 { 1.0 } else { 2.0 }))
+                        } else {
+                            None // remove column zero's row-two entry
+                        }
+                    })
+                    .collect::<Entries>()
+            };
+            let updates = vec![(2, next(2)), (0, next(0)), (1, next(1))];
+            let changed = a.replace_rows(updates);
+            let expected: Vec<_> = (0..256)
+                .filter(|&j| j == 1 || (j % 2 == 0 && j != 8))
+                .collect();
+            assert_eq!(changed, expected);
+            for i in 0..3 {
+                assert_eq!(a.row(i).to_vec(), next(i));
+            }
+            assert_eq!(a.column(0).to_vec(), [(0, 2.0), (1, 2.0)]);
+            assert_eq!(a.column(1).to_vec(), [(0, 3.0)]);
+            assert_eq!(a.row_singletons(0), 1);
+            assert!(a.replace_rows(vec![(0, next(0)), (1, next(1))]).is_empty());
+            assert!(a.replace_rows(Vec::new()).is_empty());
+            assert_eq!(
+                a.replace_rows(vec![(0, Vec::new())]),
+                next(0).iter().map(|&(j, _)| j).collect::<Vec<_>>()
+            );
+            assert!(a.row(0).is_empty());
+        }
+    }
+
     #[test]
     fn packing_skips_removed_columns_and_preserves_row_count_when_filtering() {
         let a =
