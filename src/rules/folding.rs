@@ -89,6 +89,16 @@ impl Model {
     ) -> Option<Vec<usize>> {
         let mut result = vec![usize::MAX; own.len()];
         let mut signatures = HashMap::new();
+        let mut counts = vec![0usize; own.len()];
+        for (i, &color) in own.iter().enumerate() {
+            if i % 256 == 0 && Instant::now() >= deadline {
+                return None;
+            }
+            if color != usize::MAX {
+                counts[color] += 1;
+            }
+        }
+        let mut next_color = 0usize;
         for (i, &color) in own.iter().enumerate() {
             if i % 256 == 0 && Instant::now() >= deadline {
                 return None;
@@ -107,6 +117,13 @@ impl Model {
             if !spend(work, cost) {
                 return None;
             }
+            if counts[color] == 1 {
+                // Refinement includes the previous color, so a singleton
+                // cannot split or merge. Preserve numbering and work charges.
+                result[i] = next_color;
+                next_color += 1;
+                continue;
+            }
             let mut signature = Vec::with_capacity(length);
             if ROW {
                 signature.extend(self.a.row(i).iter().map(|(j, a)| (opposite[j], bits(a))));
@@ -114,8 +131,11 @@ impl Model {
                 signature.extend(self.a.column(i).iter().map(|(j, a)| (opposite[j], bits(a))));
             }
             signature.sort_unstable();
-            let next = signatures.len();
-            result[i] = *signatures.entry((color, signature)).or_insert(next);
+            result[i] = *signatures.entry((color, signature)).or_insert_with(|| {
+                let next = next_color;
+                next_color += 1;
+                next
+            });
         }
         Some(result)
     }

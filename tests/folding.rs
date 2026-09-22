@@ -174,8 +174,19 @@ fn folding_preserves_distinct_bounds_and_rounds_scaled_objectives_once() {
     p.variable_bounds[0].upper = 1.0;
     p.variable_bounds[1].upper = 2.0;
     let r = fold(p);
-    assert_eq!(r.problem.c.len(), 3);
+    // Singleton classes and a folded pair must retain distinct, consecutive
+    // indices for both the reduced matrix and the recovery mapping.
+    assert_eq!(r.problem.c, vec![1.0, 1.0, 2.0]);
     assert_eq!(r.problem.rows.len(), 2);
+    assert_eq!(
+        r.problem.a,
+        CscMatrix::from_triplets(2, 3, vec![0, 0, 1], vec![0, 1, 2], vec![1.0, 1.0, 2.0]).unwrap()
+    );
+    let reduced = point(vec![0.5, 1.5, 1.0], vec![2.0, 3.0], vec![4.0, 5.0, 6.0]);
+    let lifted = r.postsolve.recover_solution(reduced.as_ref());
+    assert_eq!(lifted.x, vec![0.5, 1.5, 1.0, 1.0]);
+    assert_eq!(lifted.y, vec![2.0, 3.0]);
+    assert_eq!(lifted.z, vec![4.0, 5.0, 3.0, 3.0]);
     let mut p = problem();
     p.c = vec![0.1; 4];
     // Four times 0.1 is representable exactly although sequential addition is not.
