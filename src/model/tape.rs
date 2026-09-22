@@ -105,6 +105,21 @@ pub(crate) struct SocDirection {
 #[derive(Clone, Debug)]
 /// An applied rule and the data needed to reverse its changes.
 pub(crate) enum Rule {
+    /// An equitable LP quotient. Representatives occupy the first group slot.
+    LpFold {
+        columns: Vec<Vec<usize>>,
+        rows: Vec<Vec<usize>>,
+    },
+    /// x[column] = new_x[column] + slope*x[other] + offset. The removed
+    /// doubleton inequality becomes the retained column's one-sided bound.
+    BoundShift {
+        column: usize,
+        other: usize,
+        row: usize,
+        pivot: f64,
+        slope: f64,
+        offset: f64,
+    },
     DoubletonChain {
         steps: Vec<DoubletonStep>,
     },
@@ -238,6 +253,19 @@ fn active(x: f64, bound: f64) -> bool {
     bound.is_finite() && (x - bound).abs() <= 1e-8 * (1.0 + x.abs().max(bound.abs()))
 }
 
+// Common finite sums keep their original rounding. If summation overflows,
+// scaling by the largest finite magnitude keeps the mean representable.
+fn group_mean(values: &[f64], group: &[usize]) -> f64 {
+    let sum = group.iter().map(|&j| values[j]).sum::<f64>();
+    let count = group.len() as f64;
+    if sum.is_finite() || group.iter().any(|&j| !values[j].is_finite()) {
+        return sum / count;
+    }
+    let scale = group.iter().map(|&j| values[j].abs()).fold(0.0, f64::max);
+    let scaled = group.iter().map(|&j| values[j] / scale).sum::<f64>();
+    (scaled / count) * scale
+}
+
 impl RecoveryTape {
     pub fn transforms_conic_coordinates(&self) -> bool {
         self.rules
@@ -270,6 +298,44 @@ impl RecoveryTape {
     pub fn recover_with_slacks(&self, point: &mut Point, mode: Recovery, slacks: &mut [f64]) {
         for rule in self.rules.iter().rev() {
             match rule {
+                Rule::LpFold { columns, rows } => {
+                    for group in columns {
+                        let x = point.x[group[0]];
+                        let z = point.z[group[0]] / group.len() as f64;
+                        for &j in group {
+                            if mode.primal() {
+                                point.x[j] = x;
+                            }
+                            if mode.dual() {
+                                point.z[j] = z;
+                            }
+                        }
+                    }
+                    if mode.dual() {
+                        for group in rows {
+                            let y = point.y[group[0]] / group.len() as f64;
+                            for &i in group {
+                                point.y[i] = y;
+                            }
+                        }
+                    }
+                }
+                Rule::BoundShift {
+                    column,
+                    other,
+                    row,
+                    pivot,
+                    slope,
+                    offset,
+                } => {
+                    if mode.primal() {
+                        point.x[*column] += slope * point.x[*other] + mode.offset(*offset);
+                    }
+                    if mode.dual() {
+                        point.y[*row] = point.z[*column] / pivot;
+                        point.z[*column] = 0.0;
+                    }
+                }
                 Rule::DoubletonChain { steps } => {
                     if mode.primal() {
                         for step in steps {
@@ -544,6 +610,30 @@ impl RecoveryTape {
     pub fn reduce_point(&self, point: &mut Point) {
         for rule in &self.rules {
             match rule {
+                Rule::LpFold { columns, rows } => {
+                    for group in columns {
+                        let x = group_mean(&point.x, group);
+                        let z = group.iter().map(|&j| point.z[j]).sum();
+                        point.x[group[0]] = x;
+                        point.z[group[0]] = z;
+                    }
+                    for group in rows {
+                        point.y[group[0]] = group.iter().map(|&i| point.y[i]).sum();
+                    }
+                }
+                Rule::BoundShift {
+                    column,
+                    other,
+                    row,
+                    pivot,
+                    slope,
+                    offset,
+                } => {
+                    point.x[*column] -= slope * point.x[*other] + offset;
+                    point.z[*other] += slope * point.z[*column];
+                    point.z[*column] += pivot * point.y[*row];
+                    point.y[*row] = 0.0;
+                }
                 Rule::DoubletonChain { steps } => {
                     for step in steps.iter().rev() {
                         point.z[step.parent] -= step.other * point.z[step.column] / step.pivot;

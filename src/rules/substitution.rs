@@ -171,7 +171,7 @@ impl Model {
         }
     }
 
-    fn non_implied_bounds(&self, column: usize, implied: Bounds) -> Bounds {
+    pub(super) fn non_implied_bounds(&self, column: usize, implied: Bounds) -> Bounds {
         let b = self.bounds[column];
         Bounds {
             lower: if implied.lower.is_finite() && implied.lower >= b.lower {

@@ -466,7 +466,7 @@ impl Model {
         }
     }
 
-    fn set_bounds(&mut self, column: usize, bounds: Bounds) {
+    pub(super) fn set_bounds(&mut self, column: usize, bounds: Bounds) {
         let old = std::mem::replace(&mut self.bounds[column], bounds);
         if bounds.equality() {
             self.queues.fixed_columns.push(column);
