@@ -69,11 +69,11 @@ impl Model {
                 continue;
             }
             work -= scan_cost;
-            let row = self.a.row(i).to_vec();
             let activity = self.activity(i);
-            let largest = row.iter().map(|&(_, a)| a.abs()).fold(0.0, f64::max);
+            let row = self.a.row(i);
+            let largest = row.iter().map(|(_, a)| a.abs()).fold(0.0, f64::max);
             candidates.clear();
-            for &(j, a) in &row {
+            for (j, a) in row {
                 let degree = self.a.column(j).len();
                 if degree < options.min_column_length {
                     continue;
@@ -142,7 +142,7 @@ impl Model {
                 let fill = if options.preserve_nonzeros {
                     self.settings
                         .substitution_fill
-                        .min(degree.saturating_add(row.len() - 1))
+                        .min(degree.saturating_add(length - 1))
                 } else {
                     self.settings.substitution_fill
                 };
