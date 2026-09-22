@@ -21,7 +21,7 @@ macro_rules! rules {
     };
 }
 
-const RULES: [(&str, Rules); 19] = rules!(
+const RULES: [(&str, Rules); 22] = rules!(
     fixed_variables,
     empty_columns,
     quadratic_elimination,
@@ -32,6 +32,9 @@ const RULES: [(&str, Rules); 19] = rules!(
     singleton_columns,
     doubleton_equalities,
     short_equalities,
+    implied_free_equalities,
+    bound_shift,
+    lp_folding,
     equality_dependencies,
     bound_propagation,
     redundant_bounds,
@@ -100,8 +103,19 @@ pub fn settings(rule: &str, threads: usize, tuning: &Tuning) -> Result<Settings>
         settings.rules.sparsification &= !matches!(mode, SparsificationMode::Off);
         settings.sparsification.allow_auxiliary_variables = matches!(mode, SparsificationMode::All);
     }
+    for name in &tuning.with {
+        match name.as_str() {
+            "implied_free_equalities" => settings.rules.implied_free_equalities = true,
+            "bound_shift" => settings.rules.bound_shift = true,
+            "lp_folding" => settings.rules.lp_folding = true,
+            other => return Err(format!("cannot enable rule '{other}' with --with").into()),
+        }
+    }
     for name in &tuning.without {
         match name.as_str() {
+            "implied_free_equalities" => settings.rules.implied_free_equalities = false,
+            "bound_shift" => settings.rules.bound_shift = false,
+            "lp_folding" => settings.rules.lp_folding = false,
             "dual_propagation" => settings.rules.dual_propagation = false,
             "dominated_columns" => settings.rules.dominated_columns = false,
             "quadratic_elimination" => settings.rules.quadratic_elimination = false,
@@ -259,6 +273,10 @@ fn trial(
         (
             "--sparsification",
             tuning.sparsification.map(|v| v.as_str().to_owned()),
+        ),
+        (
+            "--with",
+            (!tuning.with.is_empty()).then(|| tuning.with.join(",")),
         ),
         (
             "--without",

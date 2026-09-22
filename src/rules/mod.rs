@@ -6,12 +6,15 @@
 //! together. Cheap cleanup surrounds fast and medium exploration; a cycle
 //! ends after medium exploration.
 
+mod bound_shift;
 mod bounds;
 mod cones;
 mod dependencies;
 pub(crate) mod dominated_columns;
 mod dual_fixing;
 pub(crate) mod dual_propagation;
+mod folding;
+mod implied_free;
 mod parallel;
 mod rows;
 mod sparsification;
@@ -82,6 +85,10 @@ impl Model {
     fn run_phases(&mut self, time: Duration, executor: &Executor) -> Result<Stats, Certificate> {
         let start = Instant::now();
         let mut stats = Stats::default();
+        // Folding needs the original symmetry before asymmetric pivot choices.
+        if self.settings.rules.lp_folding && start.elapsed() < time {
+            self.fold_lp(start + time);
+        }
         let mut fast = true;
         let mut cycle_size = self.work_size();
         let mut cycle_revision = self.revision;
@@ -99,6 +106,9 @@ impl Model {
                     self.singleton_columns();
                 }
                 self.cleanup()?;
+                if self.settings.rules.implied_free_equalities {
+                    self.implied_free_equalities(start + time);
+                }
                 if self.settings.rules.doubleton_equalities {
                     self.doubleton_equalities();
                 }
@@ -123,6 +133,9 @@ impl Model {
                     self.coupled_dual_fix();
                 }
                 self.cleanup()?;
+                if self.settings.rules.implied_free_equalities {
+                    self.implied_free_equalities(start + time);
+                }
                 if self.settings.rules.short_equalities {
                     self.short_equalities(start + time);
                 }
@@ -183,6 +196,23 @@ impl Model {
         if !stats.time_limit && self.settings.rules.redundant_bounds {
             self.remove_redundant_bounds();
         }
+        // Removing implied bounds exposes free pivots and one-sided columns.
+        // Visit them before dual propagation, while the independent switches
+        // continue to control every consequence rule.
+        if !stats.time_limit && self.settings.rules.implied_free_equalities {
+            let deadline = start + time;
+            if self.implied_free_equalities(deadline) > 0 {
+                self.substitution_cleanup(deadline)?;
+            }
+            stats.time_limit = Instant::now() >= deadline;
+        }
+        if !stats.time_limit && self.settings.rules.bound_shift {
+            let deadline = start + time;
+            if self.bound_shift(deadline) > 0 {
+                self.substitution_cleanup(deadline)?;
+            }
+            stats.time_limit = Instant::now() >= deadline;
+        }
         // Dual propagation runs once, on the final model: implied-free columns
         // are exposed only now, and one pass here finds what repeated passes
         // in the medium phases would, without their per-phase sweeps.
@@ -231,6 +261,9 @@ impl Model {
             if self.settings.rules.singleton_columns {
                 self.singleton_columns();
             }
+            if self.settings.rules.implied_free_equalities {
+                self.implied_free_equalities(deadline);
+            }
             if self.settings.rules.doubleton_equalities {
                 self.doubleton_equalities();
             }
@@ -255,6 +288,9 @@ impl Model {
             if self.settings.rules.singleton_columns {
                 self.singleton_columns();
             }
+            if self.settings.rules.implied_free_equalities {
+                self.implied_free_equalities(deadline);
+            }
             if self.settings.rules.doubleton_equalities {
                 self.doubleton_equalities();
             }
@@ -276,6 +312,9 @@ impl Model {
             self.cleanup()?;
             if self.settings.rules.singleton_columns {
                 self.singleton_columns();
+            }
+            if self.settings.rules.implied_free_equalities {
+                self.implied_free_equalities(deadline);
             }
             if self.settings.rules.doubleton_equalities {
                 self.doubleton_equalities();

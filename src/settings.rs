@@ -19,6 +19,8 @@ pub struct Settings {
     pub propagation: PropagationSettings,
     pub dual_propagation: DualPropagationSettings,
     pub dominated_columns: DominatedColumnSettings,
+    pub bound_shift: BoundShiftSettings,
+    pub folding: FoldingSettings,
     pub progress: Progress,
     pub sparsification: SparsificationSettings,
     /// Maximum thread count for parallel fingerprinting and sorting: 1 is serial
@@ -41,6 +43,8 @@ impl Default for Settings {
             propagation: PropagationSettings::default(),
             dual_propagation: DualPropagationSettings::default(),
             dominated_columns: DominatedColumnSettings::default(),
+            bound_shift: BoundShiftSettings::default(),
+            folding: FoldingSettings::default(),
             progress: Progress::default(),
             sparsification: SparsificationSettings::default(),
             threads: 1,
@@ -116,6 +120,19 @@ pub struct Rules {
     pub singleton_columns: bool,
     pub doubleton_equalities: bool,
     pub short_equalities: bool,
+    /// Eliminate equality pivots whose bounds are implied by the same row.
+    /// Prefer columns with at most two entries, including in long equalities.
+    /// Uses equality pivot/work limits and substitution fill/Hessian policies;
+    /// row and column length caps apply only to columns with more than two entries.
+    /// Off by default.
+    pub implied_free_equalities: bool,
+    /// Replace an inequality by a variable bound through an invertible affine
+    /// change of coordinates. Only linear pivot columns are eligible. Off by default.
+    pub bound_shift: bool,
+    /// Compress an LP using exactly verified equitable row/column partitions.
+    /// Recovery lifts primal values and redistributes multipliers over each class.
+    /// Off by default; quadratic and conic models are excluded.
+    pub lp_folding: bool,
     pub equality_dependencies: bool,
     pub bound_propagation: bool,
     pub redundant_bounds: bool,
@@ -144,6 +161,9 @@ impl Rules {
             singleton_columns: false,
             doubleton_equalities: false,
             short_equalities: false,
+            implied_free_equalities: false,
+            bound_shift: false,
+            lp_folding: false,
             equality_dependencies: false,
             bound_propagation: false,
             redundant_bounds: false,
@@ -168,6 +188,9 @@ impl Default for Rules {
             singleton_columns: true,
             doubleton_equalities: true,
             short_equalities: true,
+            implied_free_equalities: false,
+            bound_shift: false,
+            lp_folding: false,
             equality_dependencies: false,
             bound_propagation: true,
             redundant_bounds: true,
@@ -216,7 +239,8 @@ pub struct EqualitySettings {
     pub require_linear_variable: bool,
     /// Limit fill to the entries removed with the equation and pivot column.
     pub preserve_nonzeros: bool,
-    /// Default allowance: twice the current constraint nonzeros per pass.
+    /// Default allowance: twice the current constraint nonzeros per short-equality
+    /// pass, or sixteen times for the optional implied-free aggregation pass.
     pub work_limit: WorkLimit,
 }
 impl Default for EqualitySettings {
@@ -334,6 +358,48 @@ pub struct DominatedColumnSettings {
     pub general_search: bool,
     /// Default: twice the constraint nonzeros, counting visits and merge steps.
     pub work_limit: WorkLimit,
+}
+
+/// Safeguards for inequality-to-bound coordinate changes.
+#[derive(Clone, Copy, Debug)]
+pub struct BoundShiftSettings {
+    /// Maximum newly introduced constraint coefficients per change.
+    pub max_fill: usize,
+    /// Maximum number of rows incident to the pivot variable.
+    pub max_column_length: usize,
+    /// Maximum absolute coefficient ratio and its reciprocal in the affine change.
+    /// Nonfinite values and values below one disable bound shifting.
+    pub max_ratio: f64,
+    /// Default allowance: 64 times the current constraint nonzeros. A change
+    /// scans all rows incident to its pivot, including their other entries.
+    pub work_limit: WorkLimit,
+}
+
+/// Limits for LP partition refinement and exact verification.
+#[derive(Clone, Copy, Debug)]
+pub struct FoldingSettings {
+    /// Maximum alternating row/column refinement rounds.
+    pub max_rounds: usize,
+    /// Default allowance: 64 times the constraint nonzeros plus linear scans.
+    pub work_limit: WorkLimit,
+}
+impl Default for FoldingSettings {
+    fn default() -> Self {
+        Self {
+            max_rounds: 16,
+            work_limit: WorkLimit::Default,
+        }
+    }
+}
+impl Default for BoundShiftSettings {
+    fn default() -> Self {
+        Self {
+            max_fill: 64,
+            max_column_length: 64,
+            max_ratio: 1e4,
+            work_limit: WorkLimit::Default,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
