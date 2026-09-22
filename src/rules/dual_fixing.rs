@@ -96,7 +96,7 @@ impl Model {
                 }
                 let mut gradient = self.objective.c[j];
                 let mut magnitude = gradient.abs();
-                for &(k, a) in self.objective.p.row(j) {
+                for (k, a) in self.objective.p.row(j) {
                     let x = if k == j {
                         value
                     } else if (side == Side::Lower) == (a > 0.0) {

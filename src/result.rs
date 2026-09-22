@@ -11,7 +11,7 @@ pub struct Size {
     /// Nonzero values, excluding explicitly stored zeros.
     pub a_nonzeros: usize,
     pub g_nonzeros: usize,
-    /// Full symmetric storage: each off-diagonal pair counts twice.
+    /// Nonzeros of the full symmetric matrix: off-diagonal pairs count twice.
     pub p_nonzeros: usize,
 }
 /// Short-equality candidate decisions. Counts include revisits across passes.

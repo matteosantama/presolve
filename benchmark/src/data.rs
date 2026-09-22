@@ -11,7 +11,7 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-pub const SUITES: [&str; 2] = ["netlib", "maros-meszaros"];
+pub const SUITES: [&str; 4] = ["netlib", "maros-meszaros", "qplib", "miplib"];
 
 pub fn problems(suite: &str) -> Result<Vec<PathBuf>> {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"))

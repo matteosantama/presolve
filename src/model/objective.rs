@@ -3,7 +3,7 @@
 //! Sparse quadratic objective updates under affine transformations.
 //! Every affine substitution applies P' = T^T P T, c' = T^T(c+P d).
 
-use crate::matrix::sparse::{Entries, SymmetricMatrix};
+use crate::matrix::sparse::{Coefficient, Entries, SymmetricMatrix};
 use std::time::Instant;
 
 #[derive(Clone, Copy, Debug)]
@@ -44,6 +44,7 @@ pub(crate) struct Scratch {
     slope_indices: Vec<usize>,
     linear: Entries,
     quadratic: Vec<(usize, usize, f64)>,
+    values: Vec<(Coefficient, f64)>,
 }
 impl Scratch {
     fn clear(&mut self) {
@@ -52,6 +53,7 @@ impl Scratch {
         self.slope_indices.clear();
         self.linear.clear();
         self.quadratic.clear();
+        self.values.clear();
     }
 }
 
@@ -75,7 +77,7 @@ impl Objective {
         self.p
             .row(column)
             .iter()
-            .all(|&(j, _)| j == column)
+            .all(|(j, _)| j == column)
             .then(|| self.p.get(column, column))
     }
 
@@ -117,13 +119,7 @@ impl Objective {
             let curved = !self.p.column(k).is_empty();
             // Merge the two sorted supports once. The LP path stages only its
             // linear coefficients, without constructing quadratic scratch data.
-            let mut p = self
-                .p
-                .column(k)
-                .iter()
-                .copied()
-                .filter(|&(j, _)| j != k)
-                .peekable();
+            let mut p = self.p.column(k).iter().filter(|&(j, _)| j != k).peekable();
             let mut slopes = slopes.iter().copied().peekable();
             while p.peek().is_some() || slopes.peek().is_some() {
                 let pj = p.peek().map_or(usize::MAX, |e| e.0);
@@ -163,69 +159,74 @@ impl Objective {
             let mut removed = 2 * self.p.column(k).len() - usize::from(diagonal != 0.0);
             let mut visits = 0usize;
             // Pairs arrive with `l` increasing for each `j`, so the existing
-            // coefficient comes from a cursor over row `j` of the Hessian
+            // coefficient comes from a cursor over the upper half of Hessian row `j`
             // rather than a binary search per pair. The cursor restarts if a
             // request ever steps backwards, so the value read is always the
             // stored one.
-            let mut row: &[(usize, f64)] = &[];
+            let mut row = self.p.upper_row(k);
             let mut row_of = usize::MAX;
-            let mut cursor = 0usize;
-            let mut update =
-                |j: usize, l: usize, missing: bool| -> Result<(), SubstitutionFailure> {
-                    visits += 1;
-                    if visits.is_multiple_of(1024) && deadline.is_some_and(|d| Instant::now() >= d)
-                    {
-                        return Err(SubstitutionFailure::Deadline);
-                    }
-                    let a = &scratch.affected[j];
-                    let b = &scratch.affected[l];
-                    if row_of != j {
-                        row_of = j;
-                        row = self.p.row(a.column);
-                        cursor = 0;
-                    } else if cursor > 0 && row[cursor - 1].0 >= b.column {
-                        cursor = 0;
-                    }
-                    while cursor < row.len() && row[cursor].0 < b.column {
-                        cursor += 1;
-                    }
-                    let old = match row.get(cursor) {
-                        Some(&(column, value)) if column == b.column => value,
-                        _ => 0.0,
-                    };
-                    // Each unordered candidate occurs once in each pass. Reject
-                    // excessive fill before staging updates to existing positions.
-                    if (old == 0.0) != missing {
-                        return Ok(());
-                    }
-                    let value = old
-                        + a.curvature * b.slope
-                        + a.slope * b.curvature
-                        + diagonal * a.slope * b.slope;
-                    if !value.is_finite() {
-                        return Err(SubstitutionFailure::Numerical);
-                    }
-                    let count = if j == l { 1 } else { 2 };
-                    if old == 0.0 && value != 0.0 {
-                        added += count;
-                        if added > max_fill {
-                            return Err(SubstitutionFailure::QuadraticFill);
+            let mut previous = None;
+            // Expand at both call sites: an outlined closure saves registers and
+            // reloads captures for every pair in this quadratic loop.
+            macro_rules! update {
+                ($j:expr, $l:expr, $missing:expr) => {{
+                    let (j, l, missing) = ($j, $l, $missing);
+                    'update: {
+                        visits += 1;
+                        if visits.is_multiple_of(1024)
+                            && deadline.is_some_and(|d| Instant::now() >= d)
+                        {
+                            break 'update Err(SubstitutionFailure::Deadline);
                         }
-                    } else if old != 0.0 && value == 0.0 {
-                        removed += count;
+                        let a = &scratch.affected[j];
+                        let b = &scratch.affected[l];
+                        if row_of != j || previous.is_some_and(|last| last >= b.column) {
+                            row_of = j;
+                            row = self.p.upper_row(a.column);
+                        }
+                        previous = Some(b.column);
+                        let (old, coefficient) = row.advance_to_entry(b.column);
+                        // Each unordered candidate occurs once in each pass. Reject
+                        // excessive fill before staging updates to existing positions.
+                        if (old == 0.0) != missing {
+                            break 'update Ok(());
+                        }
+                        let value = old
+                            + a.curvature * b.slope
+                            + a.slope * b.curvature
+                            + diagonal * a.slope * b.slope;
+                        if !value.is_finite() {
+                            break 'update Err(SubstitutionFailure::Numerical);
+                        }
+                        let count = if j == l { 1 } else { 2 };
+                        if old == 0.0 && value != 0.0 {
+                            added += count;
+                            if added > max_fill {
+                                break 'update Err(SubstitutionFailure::QuadraticFill);
+                            }
+                        } else if old != 0.0 && value == 0.0 {
+                            removed += count;
+                        }
+                        if value != old {
+                            if value != 0.0
+                                && let Some(coefficient) = coefficient
+                            {
+                                scratch.values.push((coefficient, value));
+                            } else {
+                                scratch.quadratic.push((a.column, b.column, value));
+                            }
+                        }
+                        Ok(())
                     }
-                    if value != old {
-                        scratch.quadratic.push((a.column, b.column, value));
-                    }
-                    Ok(())
-                };
+                }};
+            }
             for missing in [true, false] {
                 for (j, a) in scratch.affected.iter().enumerate() {
                     let use_slopes = a.curvature != 0.0 || (diagonal != 0.0 && a.has_slope);
                     let use_curvature = a.has_slope;
                     if use_slopes && use_curvature {
                         for l in j..scratch.affected.len() {
-                            update(j, l, missing)?;
+                            update!(j, l, missing)?;
                         }
                     } else {
                         let indices = if use_slopes {
@@ -237,7 +238,7 @@ impl Objective {
                         };
                         let start = indices.partition_point(|&l| l < j);
                         for &l in &indices[start..] {
-                            update(j, l, missing)?;
+                            update!(j, l, missing)?;
                         }
                     }
                 }
@@ -248,6 +249,9 @@ impl Objective {
             if scratch.linear.iter().any(|e| !e.1.is_finite()) {
                 return Err(SubstitutionFailure::Numerical);
             }
+            // No affected pair contains k. Update live slots before deleting k
+            // or inserting/cancelling entries, any of which may compact the arena.
+            self.p.update_values(&scratch.values);
             self.p.remove_variable(k);
             self.c[k] = 0.0;
             for &(j, c) in &scratch.linear {
@@ -283,12 +287,12 @@ impl Objective {
         self.p
             .column(j)
             .iter()
-            .all(|&(r, a)| near(self.p.get(r, k), ratio * a))
+            .all(|(r, a)| near(self.p.get(r, k), ratio * a))
             && self
                 .p
                 .column(k)
                 .iter()
-                .all(|&(r, a)| near(a, ratio * self.p.get(r, j)))
+                .all(|(r, a)| near(a, ratio * self.p.get(r, j)))
     }
 
     pub fn aggregate(&mut self, column: usize) {
@@ -418,7 +422,7 @@ mod tests {
             + o.c.iter().zip(x).map(|(c, x)| c * x).sum::<f64>()
             + 0.5
                 * (0..x.len())
-                    .flat_map(|i| o.p.row(i).iter().map(move |&(j, a)| a * x[i] * x[j]))
+                    .flat_map(|i| o.p.row(i).iter().map(move |(j, a)| a * x[i] * x[j]))
                     .sum::<f64>()
     }
 
@@ -446,8 +450,11 @@ mod tests {
             assert_eq!(objective.c, original.c);
             assert_eq!(objective.constant, original.constant);
             for i in 0..3 {
-                assert_eq!(objective.p.row(i), original.p.row(i));
-                assert_eq!(objective.p.column(i), original.p.column(i));
+                assert_eq!(objective.p.row(i).to_vec(), original.p.row(i).to_vec());
+                assert_eq!(
+                    objective.p.column(i).to_vec(),
+                    original.p.column(i).to_vec()
+                );
             }
         }
     }
@@ -596,6 +603,63 @@ mod tests {
                     value(&objective, &[0.0, y, z])
                 );
             }
+        }
+    }
+    #[test]
+    fn repeated_substitutions_preserve_coefficients_across_arena_compaction() {
+        let n = 80;
+        let mut dense: Vec<f64> = (0..n)
+            .flat_map(|i| {
+                (0..n).map(move |j| {
+                    let a = (i % 7) as f64 - 3.;
+                    let b = (j % 7) as f64 - 3.;
+                    a * b + if i == j { 1. } else { 0. }
+                })
+            })
+            .collect();
+        let mut objective = Objective {
+            p: SymmetricMatrix::from_matrix(
+                &crate::matrix::test_matrix(n, n, dense.clone()).unwrap(),
+            ),
+            c: vec![0.; n],
+            constant: 0.,
+            scratch: Default::default(),
+        };
+        for k in 0..65 {
+            let slopes = [(k + 1, -0.5), (k + 2, 0.25)];
+            objective
+                .try_substitute(k, 0., &slopes, usize::MAX, true, None)
+                .unwrap();
+            let mut next = vec![0.; n * n];
+            let slope = |j| {
+                if j == k + 1 {
+                    -0.5
+                } else if j == k + 2 {
+                    0.25
+                } else {
+                    0.
+                }
+            };
+            for i in k + 1..n {
+                for j in i..n {
+                    let expected = dense[i * n + j]
+                        + dense[i * n + k] * slope(j)
+                        + slope(i) * dense[k * n + j]
+                        + dense[k * n + k] * slope(i) * slope(j);
+                    next[i * n + j] = expected;
+                    next[j * n + i] = expected;
+                }
+            }
+            for i in 0..n {
+                for j in 0..n {
+                    assert_eq!(
+                        objective.p.get(i, j),
+                        next[i * n + j],
+                        "pivot {k}, ({i}, {j})"
+                    );
+                }
+            }
+            dense = next;
         }
     }
 }

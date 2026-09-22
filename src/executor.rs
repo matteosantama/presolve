@@ -71,43 +71,42 @@ fn sort_by_radix_key<T: Ord + Copy>(values: &mut Vec<T>, key: impl Fn(&T) -> u64
     if values.is_sorted() {
         return;
     }
-    let mut keyed: Vec<(u64, u32)> = values
-        .iter()
-        .enumerate()
-        .map(|(at, value)| (key(value), at as u32))
-        .collect();
-    let mut scratch = vec![(0u64, 0u32); n];
+    // Sort records directly, avoiding a separate key/index array and final gather.
+    let mut scratch = values.clone();
     let mut seen = vec![false; 1 << 16];
     let mut distinct = 0;
-    for &(k, _) in &keyed {
-        let digit = ((k >> 32) & 0xffff) as usize;
+    for value in values.iter() {
+        let digit = ((key(value) >> 32) & 0xffff) as usize;
         if !seen[digit] {
             seen[digit] = true;
             distinct += 1;
         }
     }
     if distinct < n / 64 {
-        lsd_sort(&mut keyed, &mut scratch);
+        lsd_sort(values, &mut scratch, &key);
     } else {
-        msd_sort(&mut keyed, &mut scratch, 0);
+        msd_sort(values, &mut scratch, 0, &key);
     }
-    let mut sorted: Vec<T> = keyed.iter().map(|&(_, at)| values[at as usize]).collect();
     let mut start = 0;
     while start < n {
         let mut end = start + 1;
-        while end < n && keyed[end].0 == keyed[start].0 {
+        while end < n && key(&values[end]) == key(&values[start]) {
             end += 1;
         }
-        sorted[start..end].sort_unstable();
+        values[start..end].sort_unstable();
         start = end;
     }
-    *values = sorted;
 }
 
 /// Most-significant-digit radix sort by key. The digit width follows the
 /// slice length so buckets stay a few elements deep; a digit that is constant
 /// over the slice is consumed without a scatter.
-fn msd_sort(values: &mut [(u64, u32)], scratch: &mut [(u64, u32)], consumed: u32) {
+fn msd_sort<T: Ord + Copy>(
+    values: &mut [T],
+    scratch: &mut [T],
+    consumed: u32,
+    key: &impl Fn(&T) -> u64,
+) {
     let n = values.len();
     if n <= 64 || consumed >= 64 {
         values.sort_unstable();
@@ -118,18 +117,18 @@ fn msd_sort(values: &mut [(u64, u32)], scratch: &mut [(u64, u32)], consumed: u32
     let mask = (1usize << bits) - 1;
     let digit = |k: u64| ((k >> shift) as usize) & mask;
     let mut starts = vec![0u32; (1 << bits) + 1];
-    for &(k, _) in values.iter() {
-        starts[digit(k) + 1] += 1;
+    for entry in values.iter() {
+        starts[digit(key(entry)) + 1] += 1;
     }
     if starts[1..].contains(&(n as u32)) {
-        return msd_sort(values, scratch, consumed + bits);
+        return msd_sort(values, scratch, consumed + bits, key);
     }
     for b in 0..(1 << bits) {
         starts[b + 1] += starts[b];
     }
     let mut next = starts.clone();
     for &entry in values.iter() {
-        let slot = &mut next[digit(entry.0)];
+        let slot = &mut next[digit(key(&entry))];
         scratch[*slot as usize] = entry;
         *slot += 1;
     }
@@ -137,19 +136,24 @@ fn msd_sort(values: &mut [(u64, u32)], scratch: &mut [(u64, u32)], consumed: u32
     for b in 0..(1 << bits) {
         let (lo, hi) = (starts[b] as usize, starts[b + 1] as usize);
         if hi - lo > 1 {
-            msd_sort(&mut values[lo..hi], &mut scratch[lo..hi], consumed + bits);
+            msd_sort(
+                &mut values[lo..hi],
+                &mut scratch[lo..hi],
+                consumed + bits,
+                key,
+            );
         }
     }
 }
 
 /// Four 16-bit counting passes from the low word up, skipping constant digits.
-fn lsd_sort(keyed: &mut Vec<(u64, u32)>, scratch: &mut Vec<(u64, u32)>) {
+fn lsd_sort<T: Copy>(keyed: &mut Vec<T>, scratch: &mut Vec<T>, key: &impl Fn(&T) -> u64) {
     let n = keyed.len();
     for shift in (0..64).step_by(16) {
         let digit = |k: u64| ((k >> shift) & 0xffff) as usize;
         let mut starts = vec![0usize; 1 << 16];
-        for &(k, _) in keyed.iter() {
-            starts[digit(k)] += 1;
+        for entry in keyed.iter() {
+            starts[digit(key(entry))] += 1;
         }
         if starts.contains(&n) {
             continue;
@@ -161,7 +165,7 @@ fn lsd_sort(keyed: &mut Vec<(u64, u32)>, scratch: &mut Vec<(u64, u32)>) {
             total += count;
         }
         for &entry in keyed.iter() {
-            let slot = &mut starts[digit(entry.0)];
+            let slot = &mut starts[digit(key(&entry))];
             scratch[*slot] = entry;
             *slot += 1;
         }
