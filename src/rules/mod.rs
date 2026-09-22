@@ -87,6 +87,14 @@ impl Model {
         let mut stats = Stats::default();
         // Folding needs the original symmetry before asymmetric pivot choices.
         if self.settings.rules.lp_folding && start.elapsed() < time {
+            // Conic callers encode variable bounds as singleton rows. Recover
+            // those bounds before looking for symmetry, without choosing pivots.
+            if self.settings.rules.singleton_rows
+                && self.cones.is_empty()
+                && self.objective.p.nnz() == 0
+            {
+                self.singleton_rows()?;
+            }
             self.fold_lp(start + time);
         }
         let mut fast = true;

@@ -11,14 +11,17 @@ fn bits(x: f64) -> u64 {
     if x == 0.0 { 0 } else { x.to_bits() }
 }
 
-fn partition<K: Eq + Hash>(items: impl Iterator<Item = (usize, K)>, length: usize) -> Vec<usize> {
+fn partition<K: Eq + Hash>(
+    items: impl Iterator<Item = (usize, K)>,
+    length: usize,
+) -> (Vec<usize>, usize) {
     let mut colors = vec![usize::MAX; length];
     let mut table = HashMap::new();
     for (i, key) in items {
         let next = table.len();
         colors[i] = *table.entry(key).or_insert(next);
     }
-    colors
+    (colors, table.len())
 }
 
 fn groups(colors: &[usize]) -> Vec<Vec<usize>> {
@@ -86,7 +89,7 @@ impl Model {
         opposite: &[usize],
         work: &mut usize,
         deadline: Instant,
-    ) -> Option<Vec<usize>> {
+    ) -> Option<(Vec<usize>, usize)> {
         let mut result = vec![usize::MAX; own.len()];
         let mut signatures = HashMap::new();
         let mut counts = vec![0usize; own.len()];
@@ -137,7 +140,7 @@ impl Model {
                 next
             });
         }
-        Some(result)
+        Some((result, next_color))
     }
 
     /// Restrict an LP to class-constant primal coordinates and average rows.
@@ -162,31 +165,52 @@ impl Model {
         {
             return 0;
         }
-        let mut rows = partition(
+        let (mut rows, mut row_classes) = partition(
             self.rows.iter().enumerate().filter_map(|(i, r)| match r {
-                RowDomain::Linear(b) => Some((i, (bits(b.lower), bits(b.upper)))),
+                RowDomain::Linear(b) => {
+                    Some((i, (bits(b.lower), bits(b.upper), self.a.row(i).len())))
+                }
                 _ => None,
             }),
             self.rows.len(),
         );
-        let mut columns = partition(
+        let (mut columns, mut column_classes) = partition(
             self.bounds.iter().enumerate().filter_map(|(j, b)| {
-                self.alive[j]
-                    .then_some((j, (bits(self.objective.c[j]), bits(b.lower), bits(b.upper))))
+                self.alive[j].then_some((
+                    j,
+                    (
+                        bits(self.objective.c[j]),
+                        bits(b.lower),
+                        bits(b.upper),
+                        self.a.column(j).len(),
+                    ),
+                ))
             }),
             self.bounds.len(),
         );
+        // Degree is invariant inside every exact multiset class. Including it
+        // initially preserves the final partition while avoiding needless splits.
+        let active_rows = rows.iter().filter(|&&c| c != usize::MAX).count();
+        let active_columns = columns.iter().filter(|&&c| c != usize::MAX).count();
         let mut stable = false;
         for _ in 0..self.settings.folding.max_rounds {
-            let Some(r) = self.fold_refine::<true>(&rows, &columns, &mut work, deadline) else {
+            // Refinement only splits classes. If every class is a singleton,
+            // no compression is possible, even without reaching a fixed point.
+            if row_classes == active_rows && column_classes == active_columns {
+                return 0;
+            }
+            let Some((r, nr)) = self.fold_refine::<true>(&rows, &columns, &mut work, deadline)
+            else {
                 return 0;
             };
-            let Some(c) = self.fold_refine::<false>(&columns, &r, &mut work, deadline) else {
+            let Some((c, nc)) = self.fold_refine::<false>(&columns, &r, &mut work, deadline) else {
                 return 0;
             };
             stable = r == rows && c == columns;
             rows = r;
             columns = c;
+            row_classes = nr;
+            column_classes = nc;
             if stable {
                 break;
             }
