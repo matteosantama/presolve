@@ -2,3 +2,5 @@
 
 /target/
 /benchmark/results/
+
+.DS_Store
