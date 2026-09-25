@@ -1,5 +1,6 @@
 //! Bounded exact-arithmetic equality dependencies, without changing A or P
 //! until a complete relation has been established in scratch storage.
+use crate::result::RuleId;
 use crate::{
     matrix::sparse::Entries,
     model::tape::{Certificate, Rule},
@@ -150,6 +151,7 @@ impl Model {
     }
 
     pub fn equality_dependencies(&mut self, deadline: Instant) -> Result<usize, Certificate> {
+        self.enter(RuleId::EqualityDependencies);
         let options = self.settings.dependencies;
         let mut work = options.work_limit.resolve(self.a.nnz().saturating_mul(4));
         if work == 0 || options.max_basis_rows == 0 || options.max_row_length == 0 {
@@ -238,7 +240,7 @@ impl Model {
                         .map(|&(j, a)| (j, -a))
                         .collect();
                     self.clear_row(i);
-                    self.postsolve.rules.push(Rule::DependentRow {
+                    self.record(Rule::DependentRow {
                         row: i,
                         coefficients,
                     });

@@ -609,6 +609,14 @@ Finding a recession ray alone does not prove primal unboundedness. The entry
 point also checks a cheap feasible-point candidate; if that check fails, it
 returns a reduced or unchanged problem for a solver to handle.
 
+`Stats` reports the model size before and after, elapsed time, the number of
+fast and medium scheduler phases, and a `Reductions` table counting every
+applied transformation by the rule family that applied it (`RuleId`, named
+after the `Rules` switches) and by kind (`ReductionKind`, one per recovery
+record plus relaxed implied bounds). The table is a pure function of the input
+and settings whenever the time limit is not reached, so it is suitable for
+regression comparisons; `Stats::elapsed` is not.
+
 Applied transformations record recovery data on a tape. Reversing the tape
 restores eliminated variables, linear and bound multipliers, conic duals, and
 conic slacks. `Postsolve` exposes solution recovery, primal-ray recovery,

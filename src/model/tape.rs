@@ -4,7 +4,9 @@
 //! objective derivative is evaluated after recovering its primal value,
 //! supporting coupled quadratic objectives and sequences of substitutions.
 
-use crate::{matrix::sparse::Entries, model::objective::Gradient, problem::Bounds};
+use crate::{
+    matrix::sparse::Entries, model::objective::Gradient, problem::Bounds, result::ReductionKind,
+};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,6 +220,31 @@ pub(crate) enum Rule {
         offset: f64,
         slopes: Entries,
     },
+}
+impl Rule {
+    pub(crate) fn kind(&self) -> ReductionKind {
+        match self {
+            Self::LpFold { .. } => ReductionKind::LpFold,
+            Self::BoundShift { .. } => ReductionKind::BoundShift,
+            Self::DoubletonChain { .. } => ReductionKind::DoubletonChain,
+            Self::SocAggregated { .. } => ReductionKind::SocAggregated,
+            Self::ConeSlack { .. } => ReductionKind::ConeSlack,
+            Self::SocToLinear { .. } => ReductionKind::SocToLinear,
+            Self::SocFace { .. } => ReductionKind::SocFace,
+            Self::PsdZeroFace { .. } => ReductionKind::PsdZeroFace,
+            Self::RowCombination { .. } => ReductionKind::RowCombination,
+            Self::Fixed { .. } => ReductionKind::Fixed,
+            Self::Substituted { .. } => ReductionKind::Substituted,
+            Self::DependentRow { .. } => ReductionKind::DependentRow,
+            Self::MergedRow { .. } => ReductionKind::MergedRow,
+            Self::DeletedRow(_) => ReductionKind::DeletedRow,
+            Self::TightenedBound { .. } => ReductionKind::TightenedBound,
+            Self::TightenedRow { .. } => ReductionKind::TightenedRow,
+            Self::ParallelColumns { .. } => ReductionKind::ParallelColumns,
+            Self::Unlocked { .. } => ReductionKind::Unlocked,
+            Self::Eliminated { .. } => ReductionKind::Eliminated,
+        }
+    }
 }
 
 /// Infeasibility proof or recession ray in stable working coordinates.

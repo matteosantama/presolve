@@ -1,5 +1,6 @@
 //! Incremental, exact structural cone simplification.
 use crate::problem::{Bounds, Cone};
+use crate::result::RuleId;
 use crate::{
     model::tape::{Certificate, Rule, SocDirection},
     model::{Model, RowDomain},
@@ -123,7 +124,7 @@ impl Model {
                 self.alive[member.column] = false;
             }
             aggregated = true;
-            self.postsolve.rules.push(Rule::SocAggregated {
+            self.record(Rule::SocAggregated {
                 column,
                 row,
                 members,
@@ -147,7 +148,7 @@ impl Model {
     fn remove_cone_row(&mut self, i: usize) {
         let rhs = self.cone_rhs(i);
         if rhs != 0. || !self.a.row(i).is_empty() {
-            self.postsolve.rules.push(Rule::ConeSlack {
+            self.record(Rule::ConeSlack {
                 row: i,
                 rhs,
                 entries: self.a.row(i).to_vec(),
@@ -170,13 +171,14 @@ impl Model {
                 }
             }),
         );
-        self.postsolve.rules.push(Rule::ConeSlack {
+        self.record(Rule::ConeSlack {
             row: i,
             rhs,
             entries,
         });
     }
     pub fn simplify_cones(&mut self) -> Result<(), Certificate> {
+        self.enter(RuleId::Cones);
         let mut visited = 0_usize;
         while let Some(block) = self.changed_cones.pop() {
             if visited.is_multiple_of(256)
@@ -239,7 +241,7 @@ impl Model {
                         for &i in &rows[1..] {
                             self.linear_cone_row(i, true);
                         }
-                        self.postsolve.rules.push(Rule::SocFace {
+                        self.record(Rule::SocFace {
                             head,
                             tail: rows[1..].to_vec(),
                         });
@@ -293,13 +295,13 @@ impl Model {
                                 upper: h0 - h1,
                             }),
                         );
-                        self.postsolve.rules.push(Rule::SocToLinear { head, tail });
-                        self.postsolve.rules.push(Rule::ConeSlack {
+                        self.record(Rule::SocToLinear { head, tail });
+                        self.record(Rule::ConeSlack {
                             row: head,
                             rhs: h0,
                             entries: r0,
                         });
-                        self.postsolve.rules.push(Rule::ConeSlack {
+                        self.record(Rule::ConeSlack {
                             row: tail,
                             rhs: h1,
                             entries: r1,
@@ -340,7 +342,7 @@ impl Model {
                                 k += 1;
                             }
                         }
-                        self.postsolve.rules.push(Rule::PsdZeroFace { rows, order });
+                        self.record(Rule::PsdZeroFace { rows, order });
                         continue;
                     }
                     // Connected components of structurally nonzero off-diagonal

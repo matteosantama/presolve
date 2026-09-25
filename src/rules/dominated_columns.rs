@@ -4,6 +4,7 @@
 //! keeps every row feasible and never increases a linear objective, so a
 //! feasible point can slide until the dominated variable reaches its bound.
 
+use crate::result::RuleId;
 use crate::{
     model::tape::{Certificate, Side},
     model::{Model, RowDomain},
@@ -278,6 +279,7 @@ impl Model {
     /// The fixed variable's recovered reduced cost has the sign of the
     /// dominating column's, so no dual transformation is recorded beyond `Fixed`.
     pub fn dominated_columns(&mut self) -> Result<usize, Certificate> {
+        self.enter(RuleId::DominatedColumns);
         let (mut scratch, mut work) = self.begin_pass();
         let n = self.bounds.len();
         let mut fixed = 0;

@@ -292,7 +292,7 @@ impl Model {
         self.objective.c[root] = cost;
         self.objective.constant = constant;
         self.replace_rows_batch(updates);
-        self.postsolve.rules.push(Rule::DoubletonChain { steps });
+        self.record(Rule::DoubletonChain { steps });
         true
     }
 }

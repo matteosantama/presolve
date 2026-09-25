@@ -21,6 +21,7 @@ use crate::{
         tape::{Certificate, Equation, Point, Recovery, RecoveryTape, Rule, Side},
     },
     problem::Bounds,
+    result::{Phases, ReductionKind, Reductions, RuleId},
 };
 use std::{sync::Arc, time::Instant};
 
@@ -86,6 +87,11 @@ pub(crate) struct Model {
     pub cones: Vec<crate::problem::Cone>,
     pub cone_rows: Vec<Vec<usize>>,
     pub changed_cones: crate::model::queues::Worklist,
+    /// Rule credited with reductions recorded from now on; `None` before
+    /// scheduling starts.
+    pub rule: Option<RuleId>,
+    pub reductions: Reductions,
+    pub phases: Phases,
 }
 
 /// A row never has this many infinite terms, so the count marks a cached
@@ -226,6 +232,9 @@ impl Model {
             cones: vec![],
             cone_rows: vec![],
             changed_cones,
+            rule: None,
+            reductions: Reductions::default(),
+            phases: Phases::default(),
         };
         for j in 0..n {
             model.column_changed(j);
@@ -250,6 +259,29 @@ impl Model {
     }
 
     /// Apply the caller's settings once; rules read them from `self.settings`.
+    /// Credit reductions to `rule` until the next call. Every rule entry
+    /// point calls this first, so nested primitives need no bookkeeping.
+    pub fn enter(&mut self, rule: RuleId) {
+        self.rule = Some(rule);
+    }
+    /// Credit reductions made inside `f` to `rule`, then restore the caller's.
+    pub fn with_rule<T>(&mut self, rule: RuleId, f: impl FnOnce(&mut Self) -> T) -> T {
+        let previous = self.rule.replace(rule);
+        let out = f(self);
+        self.rule = previous;
+        out
+    }
+    /// Count a reduction that leaves no recovery record.
+    pub fn count(&mut self, kind: ReductionKind) {
+        if let Some(rule) = self.rule {
+            self.reductions.add(rule, kind);
+        }
+    }
+    /// Append a recovery record and count it for the current rule.
+    pub fn record(&mut self, rule: Rule) {
+        self.count(rule.kind());
+        self.postsolve.rules.push(rule);
+    }
     pub fn configure(&mut self, settings: &crate::settings::Settings, deadline: Option<Instant>) {
         self.settings = settings.clone();
         self.settings.propagation = settings.propagation.sanitized();
@@ -419,7 +451,7 @@ impl Model {
     /// Delete a row whose multiplier is simply zeroed on recovery.
     pub fn delete_row(&mut self, row: usize) {
         self.clear_row(row);
-        self.postsolve.rules.push(Rule::DeletedRow(row));
+        self.record(Rule::DeletedRow(row));
     }
 
     #[inline]
@@ -508,6 +540,7 @@ impl Model {
         for (i, a) in self.a.column(column) {
             shift_cached(&mut self.activities[i], a, old, bounds);
         }
+        self.count(ReductionKind::RelaxedBound);
         self.revision += 1;
     }
 
@@ -530,7 +563,7 @@ impl Model {
             Side::Upper if value < old => bounds.upper = value,
             _ => return false,
         }
-        self.postsolve.rules.push(Rule::TightenedBound {
+        self.record(Rule::TightenedBound {
             column,
             equation,
             side,
@@ -579,7 +612,7 @@ impl Model {
             self.changed_row(i);
             self.activities[i] = kept;
         }
-        self.postsolve.rules.push(Rule::Fixed {
+        self.record(Rule::Fixed {
             column,
             value,
             gradient,
@@ -776,7 +809,7 @@ impl Model {
                 self.replace_row(i, &scratch.entries[start..end], domain);
             }
             self.replace_row(row, if retained { &remaining } else { &[] }, domain);
-            self.postsolve.rules.push(Rule::Substituted {
+            self.record(Rule::Substituted {
                 column,
                 equation,
                 gradient,
@@ -819,7 +852,7 @@ impl Model {
             Side::Upper => bounds.upper = value,
         }
         self.replace_row_bounds(row, bounds);
-        self.postsolve.rules.push(Rule::TightenedRow {
+        self.record(Rule::TightenedRow {
             row,
             source,
             ratio,
@@ -867,7 +900,7 @@ impl Model {
         {
             return false;
         }
-        self.postsolve.rules.push(Rule::ParallelColumns {
+        self.record(Rule::ParallelColumns {
             keep,
             removed,
             ratio,
@@ -923,7 +956,7 @@ impl Model {
             self.column_changed(k);
         }
         self.alive[column] = false;
-        self.postsolve.rules.push(Rule::Eliminated {
+        self.record(Rule::Eliminated {
             column,
             offset,
             slopes,
@@ -954,7 +987,7 @@ impl Model {
         for equation in &rows {
             self.clear_row(equation.row);
         }
-        self.postsolve.rules.push(Rule::Unlocked {
+        self.record(Rule::Unlocked {
             column,
             bounds: self.bounds[column],
             rows,

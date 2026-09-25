@@ -5,11 +5,18 @@ use crate::{
     model::{Model, RowDomain, tape::Recovery},
     postsolve::{Coordinates, OriginalMap, Postsolve, PrimalCertificate, SolutionRef},
     problem::{Bounds, Cone, Constraint, Problem, row_indices},
-    result::{Outcome, PresolveResult, ReducedProblem, Size, Stats, UnboundednessCertificate},
+    result::{
+        Outcome, Phases, PresolveResult, ReducedProblem, Reductions, Size, Stats,
+        UnboundednessCertificate,
+    },
     settings::Settings,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Longest budget the scheduler tracks. Larger settings mean no limit and
+/// would overflow `Instant` arithmetic.
+const MAX_BUDGET: Duration = Duration::from_secs(1 << 32);
 
 /// Failure to create the requested execution resources.
 #[derive(Debug, thiserror::Error)]
@@ -73,7 +80,8 @@ fn presolve_owned(
     // The caller's row tags, kept for certificates and the postsolve map
     // after domains have been deleted.
     let input_rows = row_indices(&problem.rows);
-    let mut model = working_model(&mut problem, settings, start);
+    let budget = settings.time_limit.min(MAX_BUDGET);
+    let mut model = working_model(&mut problem, settings, start, budget);
     let before = if input_rows.1.is_empty() {
         // Every column is alive, every row linear, and the arena stores no
         // explicit zeros, so the walk in `size` would reproduce these counts.
@@ -96,12 +104,13 @@ fn presolve_owned(
         after: Some(before),
         parallel_comparisons: 0,
         quadratic_changed: false,
+        reductions: Reductions::default(),
+        phases: Phases::default(),
     };
-    let phases = model.run(
-        settings.time_limit.saturating_sub(start.elapsed()),
-        executor,
-    );
+    let phases = model.run(budget.saturating_sub(start.elapsed()), executor);
     stats.equalities = model.equality_stats;
+    stats.reductions = std::mem::take(&mut model.reductions);
+    stats.phases = model.phases;
     stats.quadratic_changed = model.objective.p.revision != 0;
     let outcome = match phases {
         Err(certificate) => {
@@ -141,7 +150,12 @@ fn presolve_owned(
 }
 
 /// Build the working model, taking the input's editable storage and objective.
-fn working_model(problem: &mut Problem, settings: &Settings, start: Instant) -> Model {
+fn working_model(
+    problem: &mut Problem,
+    settings: &Settings,
+    start: Instant,
+    budget: Duration,
+) -> Model {
     let n = problem.c.len();
     let rows = problem
         .rows
@@ -160,7 +174,7 @@ fn working_model(problem: &mut Problem, settings: &Settings, start: Instant) -> 
     let a = LinkedMatrix::from_columns(a.rows(), a.columns(), |j| a.as_ref().column(j));
     let mut model = Model::from_parts(a, problem.take_objective(), rows, bounds);
     model.objective.constant = problem.c0;
-    model.configure(settings, start.checked_add(settings.time_limit));
+    model.configure(settings, start.checked_add(budget));
     model.set_cones(problem.cones.clone());
     model
 }

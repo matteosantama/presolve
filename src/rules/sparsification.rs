@@ -1,5 +1,6 @@
 //! Bounded row cancellation on the native ranged model. Row/column storage,
 //! bound proofs, cleanup queues, and postsolve are shared with other rules.
+use crate::result::RuleId;
 use crate::{
     matrix::sparse::Entries,
     model::tape::Rule,
@@ -78,6 +79,7 @@ fn subtract<I: Iterator<Item = (usize, f64)> + Clone>(
 
 impl Model {
     pub fn sparsify_rows(&mut self, deadline: Instant) -> usize {
+        self.enter(RuleId::Sparsification);
         let options = self.settings.sparsification;
         let m = self.rows.len();
         // One record per row keeps the three scan fields on the same cache
@@ -236,7 +238,7 @@ impl Model {
             } else {
                 None
             };
-            self.postsolve.rules.push(Rule::RowCombination {
+            self.record(Rule::RowCombination {
                 reference,
                 targets,
                 activity,
