@@ -4,7 +4,7 @@
 use crate::result::RuleId;
 use crate::{
     matrix::sparse::Entries,
-    model::{Model, RowDomain, tape::Rule},
+    model::{Model, RowDomain, tape::Record},
 };
 use std::{collections::HashMap, hash::Hash, time::Instant};
 
@@ -297,7 +297,7 @@ impl Model {
                 self.revision += 1;
             }
         }
-        self.record(Rule::LpFold {
+        self.record(Record::LpFold {
             columns: column_groups.into_iter().filter(|g| g.len() > 1).collect(),
             rows: row_groups.into_iter().filter(|g| g.len() > 1).collect(),
         });

@@ -2,7 +2,7 @@
 // Modified for this library; copyright and attribution notices are in NOTICE.
 //! Mutable working model and shared rule transformations. Every mutation
 //! updates sparse views, locks, dirty activities, and rule queues together.
-//! Rule families in `crate::rules` drive the mutations; the recovery tape
+//! Record families in `crate::rules` drive the mutations; the recovery tape
 //! records them for `crate::postsolve` to reverse.
 //! Native dual signs satisfy:
 //! `P x + c = A^T y + z`, with positive multipliers on lower bounds.
@@ -18,7 +18,7 @@ use crate::{
         activity::{Activity, Extreme, Locks},
         objective::Objective,
         queues::Queues,
-        tape::{Certificate, Equation, Point, Recovery, RecoveryTape, Rule, Side},
+        tape::{Certificate, Equation, Point, Record, Recovery, RecoveryTape, Side},
     },
     problem::Bounds,
     result::{Phases, ReductionKind, Reductions, RuleId},
@@ -87,7 +87,7 @@ pub(crate) struct Model {
     pub cones: Vec<crate::problem::Cone>,
     pub cone_rows: Vec<Vec<usize>>,
     pub changed_cones: crate::model::queues::Worklist,
-    /// Rule credited with reductions recorded from now on; `None` before
+    /// Record credited with reductions recorded from now on; `None` before
     /// scheduling starts.
     pub rule: Option<RuleId>,
     pub reductions: Reductions,
@@ -278,9 +278,9 @@ impl Model {
         }
     }
     /// Append a recovery record and count it for the current rule.
-    pub fn record(&mut self, rule: Rule) {
-        self.count(rule.kind());
-        self.postsolve.rules.push(rule);
+    pub fn record(&mut self, record: Record) {
+        self.count(record.kind());
+        self.postsolve.records.push(record);
     }
     pub fn configure(&mut self, settings: &crate::settings::Settings, deadline: Option<Instant>) {
         self.settings = settings.clone();
@@ -442,7 +442,7 @@ impl Model {
     }
 
     /// Remove a row's coefficients and retire its domain, without a record;
-    /// the caller pushes the rule that explains the row's multiplier.
+    /// the caller records the reduction that explains the row's multiplier.
     pub(super) fn clear_row(&mut self, row: usize) {
         debug_assert!(self.rows[row] != RowDomain::Deleted);
         self.replace_row(row, &[], RowDomain::Deleted);
@@ -451,7 +451,7 @@ impl Model {
     /// Delete a row whose multiplier is simply zeroed on recovery.
     pub fn delete_row(&mut self, row: usize) {
         self.clear_row(row);
-        self.record(Rule::DeletedRow(row));
+        self.record(Record::DeletedRow(row));
     }
 
     #[inline]
@@ -563,7 +563,7 @@ impl Model {
             Side::Upper if value < old => bounds.upper = value,
             _ => return false,
         }
-        self.record(Rule::TightenedBound {
+        self.record(Record::TightenedBound {
             column,
             equation,
             side,
@@ -612,7 +612,7 @@ impl Model {
             self.changed_row(i);
             self.activities[i] = kept;
         }
-        self.record(Rule::Fixed {
+        self.record(Record::Fixed {
             column,
             value,
             gradient,
@@ -809,7 +809,7 @@ impl Model {
                 self.replace_row(i, &scratch.entries[start..end], domain);
             }
             self.replace_row(row, if retained { &remaining } else { &[] }, domain);
-            self.record(Rule::Substituted {
+            self.record(Record::Substituted {
                 column,
                 equation,
                 gradient,
@@ -852,7 +852,7 @@ impl Model {
             Side::Upper => bounds.upper = value,
         }
         self.replace_row_bounds(row, bounds);
-        self.record(Rule::TightenedRow {
+        self.record(Record::TightenedRow {
             row,
             source,
             ratio,
@@ -900,7 +900,7 @@ impl Model {
         {
             return false;
         }
-        self.record(Rule::ParallelColumns {
+        self.record(Record::ParallelColumns {
             keep,
             removed,
             ratio,
@@ -956,7 +956,7 @@ impl Model {
             self.column_changed(k);
         }
         self.alive[column] = false;
-        self.record(Rule::Eliminated {
+        self.record(Record::Eliminated {
             column,
             offset,
             slopes,
@@ -987,7 +987,7 @@ impl Model {
         for equation in &rows {
             self.clear_row(equation.row);
         }
-        self.record(Rule::Unlocked {
+        self.record(Record::Unlocked {
             column,
             bounds: self.bounds[column],
             rows,

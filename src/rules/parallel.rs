@@ -6,7 +6,7 @@
 use crate::result::RuleId;
 use crate::{
     executor::Executor,
-    model::tape::{Certificate, Rule, Side},
+    model::tape::{Certificate, Record, Side},
     model::{Model, RowDomain},
     problem::Bounds,
 };
@@ -296,7 +296,7 @@ impl Model {
             self.tighten_row(base, other, ratio, Side::Upper, intersection.upper);
         }
         self.clear_row(other);
-        self.record(Rule::MergedRow {
+        self.record(Record::MergedRow {
             keep: base,
             removed: other,
             ratio,

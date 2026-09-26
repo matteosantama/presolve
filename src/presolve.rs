@@ -340,10 +340,10 @@ fn build_postsolve(
         } else {
             model
                 .postsolve
-                .rules
+                .records
                 .iter()
-                .filter_map(|rule| {
-                    if let crate::model::tape::Rule::SocAggregated { row, .. } = rule {
+                .filter_map(|record| {
+                    if let crate::model::tape::Record::SocAggregated { row, .. } = record {
                         Some(*row)
                     } else {
                         None

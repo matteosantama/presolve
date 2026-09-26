@@ -3,7 +3,7 @@
 use crate::result::RuleId;
 use crate::{
     matrix::sparse::Entries,
-    model::tape::{Certificate, Rule},
+    model::tape::{Certificate, Record},
     model::{Model, RowDomain},
 };
 use std::time::Instant;
@@ -240,7 +240,7 @@ impl Model {
                         .map(|&(j, a)| (j, -a))
                         .collect();
                     self.clear_row(i);
-                    self.record(Rule::DependentRow {
+                    self.record(Record::DependentRow {
                         row: i,
                         coefficients,
                     });

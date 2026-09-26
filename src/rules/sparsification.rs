@@ -3,7 +3,7 @@
 use crate::result::RuleId;
 use crate::{
     matrix::sparse::Entries,
-    model::tape::Rule,
+    model::tape::Record,
     model::{Model, RowDomain, shifted},
     problem::Bounds,
 };
@@ -238,7 +238,7 @@ impl Model {
             } else {
                 None
             };
-            self.record(Rule::RowCombination {
+            self.record(Record::RowCombination {
                 reference,
                 targets,
                 activity,
