@@ -11,7 +11,7 @@ fn data() -> PathBuf {
 #[test]
 fn netlib_dimensions_match_the_published_index() {
     for (name, rows, columns, nonzeros) in [
-        ("afiro", 27, 32, 88),
+        ("AFIRO", 27, 32, 88),
         ("BLEND", 74, 83, 521),
         // Blank RHS and bound set names.
         ("SIERRA", 1227, 2036, 9252),
