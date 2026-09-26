@@ -34,6 +34,13 @@ enum Command {
         /// Restrict to a family; repeat for several. Default: all.
         #[arg(long = "family")]
         families: Vec<String>,
+        /// Skip a family's files above this many MiB on disk, as FAMILY=MIB.
+        /// Repeat for several families. Giving any limit replaces the default.
+        #[arg(long = "max-size-mib", value_name = "FAMILY=MIB", default_values = ["miplib=4"])]
+        limits: Vec<corpus::SizeLimit>,
+        /// Ignore every size limit and run the whole corpus.
+        #[arg(long, conflicts_with = "limits")]
+        all_sizes: bool,
         /// Instances presolved concurrently; 0 means one per core.
         #[arg(long, default_value_t = 0)]
         jobs: usize,
@@ -61,10 +68,20 @@ fn main() -> ExitCode {
             profile,
             data,
             families,
+            limits,
+            all_sizes,
             jobs,
             slowest,
             out,
-        } => match take_snapshot(profile, &data, &families, jobs, slowest, &out) {
+        } => match take_snapshot(
+            profile,
+            &data,
+            &families,
+            if all_sizes { &[] } else { &limits },
+            jobs,
+            slowest,
+            &out,
+        ) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("error: {e}");
@@ -103,12 +120,32 @@ fn take_snapshot(
     profile: Profile,
     data: &std::path::Path,
     families: &[String],
+    limits: &[corpus::SizeLimit],
     jobs: usize,
     slowest: usize,
     out: &std::path::Path,
 ) -> Result<(), String> {
     let instances =
         corpus::discover(data, families).map_err(|e| format!("{}: {e}", data.display()))?;
+    // With --family, a limit for a family not being run does not apply.
+    // Otherwise every limit must name a family, so a typo is an error.
+    let limits: Vec<_> = limits
+        .iter()
+        .filter(|l| families.is_empty() || families.contains(&l.family))
+        .cloned()
+        .collect();
+    let (instances, excluded) = corpus::within_limits(instances, &limits)?;
+    if !excluded.is_empty() {
+        let limits: Vec<String> = limits
+            .iter()
+            .map(|l| format!("{}={} MiB", l.family, l.mib))
+            .collect();
+        eprintln!(
+            "Skipping {} instances above the size limits {}; pass --all-sizes to include them.",
+            excluded.len(),
+            limits.join(", ")
+        );
+    }
     if instances.is_empty() {
         return Err(format!("no instances under {}", data.display()));
     }

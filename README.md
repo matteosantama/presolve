@@ -664,7 +664,10 @@ cargo run --release -p benchmark -- compare benchmark/results/base.jsonl benchma
 `compare` exits with status 1 when statuses, outcomes, sizes, or reductions
 differ, and 0 when only work counters or nothing differ. `--profile
 aggressive` uses `Settings::aggressive`, `--family` restricts the run, and
-`--format markdown` suits CI summaries. Snapshots depend on the platform, so
+`--format markdown` suits CI summaries. Every data file stays in the
+repository; a snapshot skips MIPLIB files above 4 MiB by default to keep runs
+short. `--max-size-mib FAMILY=MIB` sets other per-family limits, and
+`--all-sizes` runs the whole corpus. Snapshots depend on the platform, so
 compare only snapshots taken on the same machine.
 
 `benchmark/compare-trees.sh BASE_TREE HEAD_TREE OUT_DIR` builds the benchmark
