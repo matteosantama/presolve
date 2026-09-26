@@ -1,5 +1,5 @@
 //! The reader against the benchmark corpus.
-use benchmark::mps;
+use benchmark::{corpus, mps};
 use std::path::{Path, PathBuf};
 
 fn data() -> PathBuf {
@@ -43,21 +43,22 @@ fn quadratic_fixed_format_variant_shares_its_linear_part() {
     assert!(qp.p.is_some_and(|p| !p.values().is_empty()));
 }
 
-/// Every instance parses. Slow: run with `--ignored`.
+/// Every discovered instance parses. Slow: run with `--ignored`.
 #[test]
 #[ignore]
 fn every_corpus_file_parses() {
-    let mut failures = Vec::new();
-    let mut count = 0;
-    for family in std::fs::read_dir(data()).unwrap() {
-        for file in std::fs::read_dir(family.unwrap().path()).unwrap() {
-            let path = file.unwrap().path();
-            count += 1;
-            if let Err(e) = mps::read(&path) {
-                failures.push(format!("{}: {e}", path.display()));
-            }
-        }
-    }
-    assert!(count > 0);
+    let instances = corpus::discover(&data(), &[]).unwrap();
+    assert!(!instances.is_empty());
+    let failures: Vec<String> = instances
+        .iter()
+        .filter_map(|instance| {
+            mps::read(&instance.path)
+                .err()
+                .map(|e| format!("{}: {e}", instance.id()))
+        })
+        .collect();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let mut families: Vec<&str> = instances.iter().map(|i| i.family.as_str()).collect();
+    families.dedup();
+    eprintln!("parsed {} instances in {families:?}", instances.len());
 }
