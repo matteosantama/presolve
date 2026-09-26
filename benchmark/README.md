@@ -17,8 +17,7 @@ To compare two source trees, as CI does on every pull request:
 benchmark/compare-trees.sh ../presolve-main . benchmark/results/compare
 ```
 
-CI fails on changed reductions unless the pull request has the
-`reductions-change` label.
+CI fails when reductions change.
 
 Time presolve only with the workspace release profile (one codegen unit, fat
 LTO).

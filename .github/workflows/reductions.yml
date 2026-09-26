@@ -1,90 +1,30 @@
 name: Reductions
 
-# Compare presolve reductions on the corpus between a pull request and the
-# base it merges into. Both sides are built and run on the same runner, since
-# snapshots can differ across platforms; nothing is stored between runs.
-# A change fails the job unless the pull request has the label below.
-
-on:
-  pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
-
-permissions:
-  contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-  ACCEPT_LABEL: reductions-change
+on: pull_request
 
 jobs:
   compare:
-    name: Reductions (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     steps:
-      # The pull request's merge commit, whose first parent is the base.
       - uses: actions/checkout@v7
         with:
           path: head
           fetch-depth: 2
-      - name: Find the base commit
-        id: base
+      - id: base
         run: echo "sha=$(git -C head rev-parse HEAD^1)" >> "$GITHUB_OUTPUT"
-      # The base's code only; both binaries read the pull request's corpus.
       - uses: actions/checkout@v7
         with:
           path: base
           ref: ${{ steps.base.outputs.sha }}
-          sparse-checkout-cone-mode: false
-          sparse-checkout: |
-            /*
-            !/benchmark/data/
       - uses: dtolnay/rust-toolchain@stable
-      - name: Snapshot and compare
-        id: compare
-        run: |
+      - run: |
           set +e
           head/benchmark/compare-trees.sh base head results
-          echo "status=$?" >> "$GITHUB_OUTPUT"
-          {
-            echo "## Reductions on ${{ matrix.os }}"
-            echo
-            echo "Base ${{ steps.base.outputs.sha }} against the merge commit $(git -C head rev-parse HEAD)."
-            echo
-            cat results/summary.md
-          } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: snapshots-${{ matrix.os }}
-          path: results/*.jsonl
-          if-no-files-found: ignore
-      - name: Verdict
-        env:
-          STATUS: ${{ steps.compare.outputs.status }}
-          ACCEPTED: ${{ contains(github.event.pull_request.labels.*.name, env.ACCEPT_LABEL) }}
-        run: |
-          case "$STATUS" in
-            0) echo "No reduction changes." ;;
-            3) echo "::notice::The base has no snapshot command, so there is nothing to compare." ;;
-            1)
-              if [ "$ACCEPTED" = true ]; then
-                echo "::notice::Reductions changed; accepted by the $ACCEPT_LABEL label."
-              else
-                echo "::error::Reductions changed. Review the job summary, then add the $ACCEPT_LABEL label to accept the change."
-                exit 1
-              fi
-              ;;
-            *)
-              echo "::error::Snapshot comparison failed; see the Snapshot and compare step."
-              exit 1
-              ;;
-          esac
+          status=$?
+          cat results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          if [ $status -eq 3 ]; then exit 0; fi
+          exit $status
