@@ -2,6 +2,15 @@
 members = ["benchmark"]
 resolver = "3"
 
+# Every release build in this workspace, including benchmark timings, is one
+# codegen unit with full LTO. The default split into 16 units moves code
+# between builds and shifts timings by about 1% for unrelated changes, which
+# hides the effect of the change being timed. Library users build with their
+# own profiles.
+[profile.release]
+codegen-units = 1
+lto = "fat"
+
 [package]
 name = "presolve"
 version = "0.1.0"

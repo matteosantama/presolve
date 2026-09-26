@@ -667,4 +667,11 @@ aggressive` uses `Settings::aggressive`, `--family` restricts the run, and
 `--format markdown` suits CI summaries. Snapshots depend on the platform, so
 compare only snapshots taken on the same machine.
 
+Time presolve only with the workspace release profile, which builds one
+codegen unit with full link-time optimization. With the default sixteen
+units, code placement alone moves corpus timings by about 1% between builds,
+which is as large as the effects worth measuring. A standalone timing crate
+must set the same profile, and both sides of an A/B comparison must share one
+`Cargo.lock`.
+
 Licensed under [Apache-2.0](LICENSE). Attribution is recorded in [NOTICE](NOTICE).
