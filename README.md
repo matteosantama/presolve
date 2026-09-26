@@ -589,7 +589,7 @@ applied transformation by the rule family that applied it (`RuleId`, named
 after the `Rules` switches) and by kind (`ReductionKind`, one per recovery
 record plus relaxed implied bounds). The table is a pure function of the input
 and settings whenever the time limit is not reached, so it is suitable for
-regression comparisons; `Stats::elapsed` is not.
+regression comparisons.
 
 Applied transformations record recovery data on a tape. Reversing the tape
 restores eliminated variables, linear and bound multipliers, conic duals, and
