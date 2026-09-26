@@ -202,8 +202,7 @@ so the row becomes an equality. The rule is enabled by `Settings::aggressive`
 and off by default: in the Netlib and Maros–Mészáros comparison it removed
 1481 variables and 474 rows (MAROS-R7 860 columns, 80BAU3B 377 columns and 300
 rows) but its single pass added about 6% to the corpus presolve time, mostly
-on problems where it proves nothing. See
-`docs/benchmarks/new-rules-20260917/REPORT.md`.
+on problems where it proves nothing.
 Source: [dual_propagation.rs](src/rules/dual_propagation.rs).
 
 ### Substitution
@@ -346,8 +345,7 @@ nested or overlapping supports at a cost proportional to the visits.
 The rule is enabled by `Settings::aggressive`, with the general search, and
 off by default: in the Netlib and Maros–Mészáros comparison the identical-
 support test removed 1638 variables (STANDATA, STANDGUB and QSTANDAT lose 324
-each, WOODW 242) but added about 2% to the corpus presolve time. See
-`docs/benchmarks/new-rules-20260917/REPORT.md`.
+each, WOODW 242) but added about 2% to the corpus presolve time.
 Source: [dominated_columns.rs](src/rules/dominated_columns.rs).
 
 ### Matrix sparsity
@@ -509,8 +507,9 @@ candidate. Set `equalities.max_row_length` and `equalities.max_column_length` to
 `usize::MAX` to remove these limits too. All preset fields remain editable.
 
 The preset is a starting point, not a guarantee of the smallest model on every
-problem. Use the benchmark commands below to compare dimensions, finite bound
-sides, matrix nonzeros, runtime, and time-budget outcomes on your models.
+problem. The [benchmark crate](benchmark/README.md) compares dimensions and
+reductions under the default and aggressive presets on any directory of MPS
+files, including your own models.
 
 Equality substitution also rejects near-cancellation when a nonzero updated
 coefficient is smaller than `1e-10` times the larger contributing term. This
@@ -560,31 +559,6 @@ limit scan overhead; pool initialization still happens in `Presolver::new`, even
 for small problems. Enabling the option does not guarantee a speedup. The scan
 estimates use constraint nonzeros for rows and constraint plus Hessian nonzeros
 for columns.
-
-The benchmark accepts `--threads N` and `--pool-mode cold|reused` for both time
-and size runs. `--preset default|fill|aggressive|unrestricted` selects the baseline,
-unrestricted fill with baseline searches, the measured aggressive configuration,
-or that configuration without equality length limits. Use `--time-limit-ms N`,
-`--equality-row-limit N`, `--equality-column-limit N`, and
-`--sparsification all|equalities|off` to override the preset. Pivot experiments
-also accept `--equality-pivot-relative R`, `--equality-pivot-attempts N`, and
-`--equality-cost-aware true|false`. Metadata records the
-complete resulting settings. Propagation experiments accept
-`--propagation-relative-gain R` and `--propagation-gain-factor F`; invalid
-(nonfinite or negative) values use the corresponding default. Measurements include finite variable-bound
-side counts. For example, to compare repeated-call performance:
-
-```sh
-cargo run --release -p benchmark -- run time --name serial --problem QAP12 --rule all --trials 5 --pool-mode reused
-cargo run --release -p benchmark -- run time --name parallel-4 --problem QAP12 --rule all --trials 5 --threads 4 --pool-mode reused
-cargo run --release -p benchmark -- compare time serial parallel-4
-```
-
-Timing trials use fresh processes. The default `cold` mode includes presolver
-initialization. `reused` initializes the presolver and runs one untimed warm-up
-on the same problem before measuring, so it also benefits from warmed caches.
-Loading and destruction are outside timing in both modes. Timing comparisons
-require matching pool modes, which are recorded in result metadata.
 
 ## Results and postsolve
 
@@ -649,47 +623,8 @@ Requires Rust 1.89 or newer. Run the library tests and documentation examples wi
 cargo test -p presolve
 ```
 
-The `benchmark` crate records what presolve does to every instance under
-`benchmark/data`, one subdirectory per family. A snapshot holds each
-instance's outcome, sizes, and reductions by rule and kind, which are
-deterministic because profiles run on one thread without a time limit.
-Compare two snapshots to see how a change affects reductions:
-
-```sh
-cargo run --release -p benchmark -- snapshot --profile default --out benchmark/results/base.jsonl
-cargo run --release -p benchmark -- snapshot --profile default --out benchmark/results/head.jsonl
-cargo run --release -p benchmark -- compare benchmark/results/base.jsonl benchmark/results/head.jsonl
-```
-
-`compare` exits with status 1 when statuses, outcomes, sizes, or reductions
-differ, and 0 when only work counters or nothing differ. `--profile
-aggressive` uses `Settings::aggressive`, `--family` restricts the run, and
-`--format markdown` suits CI summaries. Every data file stays in the
-repository; a snapshot skips MIPLIB files above 4 MiB by default to keep runs
-short. `--max-size-mib FAMILY=MIB` sets other per-family limits, and
-`--all-sizes` runs the whole corpus. Snapshots depend on the platform, so
-compare only snapshots taken on the same machine.
-
-`benchmark/compare-trees.sh BASE_TREE HEAD_TREE OUT_DIR` builds the benchmark
-binary from two source trees, snapshots both profiles with each against the
-head tree's corpus, and compares them. For example, against a worktree of
-`main`:
-
-```sh
-git worktree add ../presolve-main main
-benchmark/compare-trees.sh ../presolve-main . benchmark/results/compare
-```
-
-The Reductions workflow runs the same script on every pull request, on Linux
-x86, Linux arm, and macOS arm runners, and writes the comparison to the job
-summary. It fails when reductions change, unless the pull request carries the
-`reductions-change` label that accepts the change.
-
-Time presolve only with the workspace release profile, which builds one
-codegen unit with full link-time optimization. With the default sixteen
-units, code placement alone moves corpus timings by about 1% between builds,
-which is as large as the effects worth measuring. A standalone timing crate
-must set the same profile, and both sides of an A/B comparison must share one
-`Cargo.lock`.
+The `benchmark` crate records presolve's reductions on a corpus of LP and QP
+instances and compares them between versions; see
+[benchmark/README.md](benchmark/README.md).
 
 Licensed under [Apache-2.0](LICENSE). Attribution is recorded in [NOTICE](NOTICE).
