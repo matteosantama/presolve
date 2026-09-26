@@ -649,4 +649,22 @@ Requires Rust 1.89 or newer. Run the library tests and documentation examples wi
 cargo test -p presolve
 ```
 
+The `benchmark` crate records what presolve does to every instance under
+`benchmark/data`, one subdirectory per family. A snapshot holds each
+instance's outcome, sizes, and reductions by rule and kind, which are
+deterministic because profiles run on one thread without a time limit.
+Compare two snapshots to see how a change affects reductions:
+
+```sh
+cargo run --release -p benchmark -- snapshot --profile default --out benchmark/results/base.jsonl
+cargo run --release -p benchmark -- snapshot --profile default --out benchmark/results/head.jsonl
+cargo run --release -p benchmark -- compare benchmark/results/base.jsonl benchmark/results/head.jsonl
+```
+
+`compare` exits with status 1 when statuses, outcomes, sizes, or reductions
+differ, and 0 when only work counters or nothing differ. `--profile
+aggressive` uses `Settings::aggressive`, `--family` restricts the run, and
+`--format markdown` suits CI summaries. Snapshots depend on the platform, so
+compare only snapshots taken on the same machine.
+
 Licensed under [Apache-2.0](LICENSE). Attribution is recorded in [NOTICE](NOTICE).
