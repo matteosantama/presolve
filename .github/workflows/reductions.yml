@@ -1,0 +1,30 @@
+name: Reductions
+
+on: pull_request
+
+jobs:
+  compare:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: head
+          fetch-depth: 2
+      - id: base
+        run: echo "sha=$(git -C head rev-parse HEAD^1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          path: base
+          ref: ${{ steps.base.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          set +e
+          head/benchmark/compare-trees.sh base head results
+          status=$?
+          cat results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          if [ $status -eq 3 ]; then exit 0; fi
+          exit $status

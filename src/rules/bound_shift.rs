@@ -1,7 +1,8 @@
 //! Replace an implied one-sided variable bound by a doubleton inequality.
 //! The invertible coordinate change keeps both variables, but removes the row.
+use crate::result::RuleId;
 use crate::{
-    model::{Model, RowDomain, shifted, tape::Rule},
+    model::{Model, RowDomain, shifted, tape::Record},
     problem::Bounds,
 };
 use std::time::Instant;
@@ -14,6 +15,7 @@ fn product(a: f64, b: f64) -> Option<f64> {
 
 impl Model {
     pub fn bound_shift(&mut self, deadline: Instant) -> usize {
+        self.enter(RuleId::BoundShift);
         let options = self.settings.bound_shift;
         if !options.max_ratio.is_finite() || options.max_ratio < 1.0 {
             return 0;
@@ -159,7 +161,7 @@ impl Model {
                 if !valid || Instant::now() >= deadline {
                     continue;
                 }
-                self.postsolve.rules.push(Rule::BoundShift {
+                self.record(Record::BoundShift {
                     column,
                     other,
                     row,

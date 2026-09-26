@@ -4,7 +4,9 @@
 //! objective derivative is evaluated after recovering its primal value,
 //! supporting coupled quadratic objectives and sequences of substitutions.
 
-use crate::{matrix::sparse::Entries, model::objective::Gradient, problem::Bounds};
+use crate::{
+    matrix::sparse::Entries, model::objective::Gradient, problem::Bounds, result::ReductionKind,
+};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,8 +105,8 @@ pub(crate) struct SocDirection {
 }
 
 #[derive(Clone, Debug)]
-/// An applied rule and the data needed to reverse its changes.
-pub(crate) enum Rule {
+/// A record of one applied reduction and the data needed to reverse it.
+pub(crate) enum Record {
     /// An equitable LP quotient. Representatives occupy the first group slot.
     LpFold {
         columns: Vec<Vec<usize>>,
@@ -219,6 +221,31 @@ pub(crate) enum Rule {
         slopes: Entries,
     },
 }
+impl Record {
+    pub(crate) fn kind(&self) -> ReductionKind {
+        match self {
+            Self::LpFold { .. } => ReductionKind::LpFold,
+            Self::BoundShift { .. } => ReductionKind::BoundShift,
+            Self::DoubletonChain { .. } => ReductionKind::DoubletonChain,
+            Self::SocAggregated { .. } => ReductionKind::SocAggregated,
+            Self::ConeSlack { .. } => ReductionKind::ConeSlack,
+            Self::SocToLinear { .. } => ReductionKind::SocToLinear,
+            Self::SocFace { .. } => ReductionKind::SocFace,
+            Self::PsdZeroFace { .. } => ReductionKind::PsdZeroFace,
+            Self::RowCombination { .. } => ReductionKind::RowCombination,
+            Self::Fixed { .. } => ReductionKind::Fixed,
+            Self::Substituted { .. } => ReductionKind::Substituted,
+            Self::DependentRow { .. } => ReductionKind::DependentRow,
+            Self::MergedRow { .. } => ReductionKind::MergedRow,
+            Self::DeletedRow(_) => ReductionKind::DeletedRow,
+            Self::TightenedBound { .. } => ReductionKind::TightenedBound,
+            Self::TightenedRow { .. } => ReductionKind::TightenedRow,
+            Self::ParallelColumns { .. } => ReductionKind::ParallelColumns,
+            Self::Unlocked { .. } => ReductionKind::Unlocked,
+            Self::Eliminated { .. } => ReductionKind::Eliminated,
+        }
+    }
+}
 
 /// Infeasibility proof or recession ray in stable working coordinates.
 #[derive(Debug)]
@@ -246,7 +273,7 @@ impl Point {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RecoveryTape {
-    pub rules: Vec<Rule>,
+    pub records: Vec<Record>,
 }
 
 fn active(x: f64, bound: f64) -> bool {
@@ -268,16 +295,16 @@ fn group_mean(values: &[f64], group: &[usize]) -> f64 {
 
 impl RecoveryTape {
     pub fn transforms_conic_coordinates(&self) -> bool {
-        self.rules
+        self.records
             .iter()
-            .any(|rule| matches!(rule, Rule::SocAggregated { .. }))
+            .any(|record| matches!(record, Record::SocAggregated { .. }))
     }
 
     /// Transform caller-provided slacks as coordinates, independently of
     /// the primal values: an approximate warm start may not satisfy Gx+s=h.
     pub fn reduce_slacks(&self, slacks: &mut [f64]) {
-        for rule in &self.rules {
-            if let Rule::SocAggregated { row, members, .. } = rule {
+        for record in &self.records {
+            if let Record::SocAggregated { row, members, .. } = record {
                 let value = members
                     .iter()
                     .map(|m| m.sign * m.weight * slacks[m.row])
@@ -296,9 +323,9 @@ impl RecoveryTape {
         self.recover_with_slacks(point, mode, &mut []);
     }
     pub fn recover_with_slacks(&self, point: &mut Point, mode: Recovery, slacks: &mut [f64]) {
-        for rule in self.rules.iter().rev() {
-            match rule {
-                Rule::LpFold { columns, rows } => {
+        for record in self.records.iter().rev() {
+            match record {
+                Record::LpFold { columns, rows } => {
                     for group in columns {
                         let x = point.x[group[0]];
                         let z = point.z[group[0]] / group.len() as f64;
@@ -320,7 +347,7 @@ impl RecoveryTape {
                         }
                     }
                 }
-                Rule::BoundShift {
+                Record::BoundShift {
                     column,
                     other,
                     row,
@@ -336,7 +363,7 @@ impl RecoveryTape {
                         point.z[*column] = 0.0;
                     }
                 }
-                Rule::DoubletonChain { steps } => {
+                Record::DoubletonChain { steps } => {
                     if mode.primal() {
                         for step in steps {
                             point.x[step.column] = (mode.offset(step.rhs)
@@ -361,7 +388,7 @@ impl RecoveryTape {
                         }
                     }
                 }
-                Rule::SocAggregated {
+                Record::SocAggregated {
                     column,
                     row,
                     members,
@@ -382,14 +409,14 @@ impl RecoveryTape {
                         }
                     }
                 }
-                Rule::ConeSlack { row, rhs, entries } => {
+                Record::ConeSlack { row, rhs, entries } => {
                     if !mode.primal() || slacks.is_empty() {
                         continue;
                     }
                     slacks[*row] = mode.offset(*rhs)
                         - entries.iter().map(|&(j, a)| a * point.x[j]).sum::<f64>();
                 }
-                Rule::PsdZeroFace { rows, order } => {
+                Record::PsdZeroFace { rows, order } => {
                     if !mode.dual() {
                         continue;
                     }
@@ -408,7 +435,7 @@ impl RecoveryTape {
                         }
                     }
                 }
-                Rule::SocToLinear { head, tail } => {
+                Record::SocToLinear { head, tail } => {
                     if !mode.dual() {
                         continue;
                     }
@@ -417,13 +444,13 @@ impl RecoveryTape {
                     point.y[*head] = a + b;
                     point.y[*tail] = a - b;
                 }
-                Rule::SocFace { head, tail } => {
+                Record::SocFace { head, tail } => {
                     if !mode.dual() {
                         continue;
                     }
                     point.y[*head] = -tail.iter().fold(0.0_f64, |norm, &i| norm.hypot(point.y[i]));
                 }
-                Rule::RowCombination {
+                Record::RowCombination {
                     reference, targets, ..
                 } => {
                     if !mode.dual() {
@@ -433,7 +460,7 @@ impl RecoveryTape {
                         point.y[*reference] -= alpha * point.y[i];
                     }
                 }
-                Rule::Fixed {
+                Record::Fixed {
                     column,
                     value,
                     gradient,
@@ -452,7 +479,7 @@ impl RecoveryTape {
                             g - entries.iter().map(|&(i, a)| a * point.y[i]).sum::<f64>();
                     }
                 }
-                Rule::Substituted {
+                Record::Substituted {
                     column,
                     equation,
                     gradient,
@@ -482,17 +509,17 @@ impl RecoveryTape {
                                 / a;
                     }
                 }
-                Rule::DependentRow { row, .. } => {
+                Record::DependentRow { row, .. } => {
                     if mode.dual() {
                         point.y[*row] = 0.0;
                     }
                 }
-                Rule::DeletedRow(row) | Rule::MergedRow { removed: row, .. } => {
+                Record::DeletedRow(row) | Record::MergedRow { removed: row, .. } => {
                     if mode.dual() {
                         point.y[*row] = 0.0;
                     }
                 }
-                Rule::TightenedBound {
+                Record::TightenedBound {
                     column,
                     equation,
                     side,
@@ -520,7 +547,7 @@ impl RecoveryTape {
                     }
                     point.z[*column] = 0.0;
                 }
-                Rule::TightenedRow {
+                Record::TightenedRow {
                     row,
                     source,
                     ratio,
@@ -532,7 +559,7 @@ impl RecoveryTape {
                     point.y[*source] += ratio * point.y[*row];
                     point.y[*row] = 0.0;
                 }
-                Rule::ParallelColumns {
+                Record::ParallelColumns {
                     keep,
                     removed,
                     ratio,
@@ -558,7 +585,7 @@ impl RecoveryTape {
                         point.z[*removed] = ratio * point.z[*keep];
                     }
                 }
-                Rule::Eliminated {
+                Record::Eliminated {
                     column,
                     offset,
                     slopes,
@@ -572,7 +599,7 @@ impl RecoveryTape {
                         point.z[*column] = 0.0;
                     }
                 }
-                Rule::Unlocked {
+                Record::Unlocked {
                     column,
                     bounds,
                     rows,
@@ -608,9 +635,9 @@ impl RecoveryTape {
     /// These transformations preserve exact stationary starts where possible;
     /// the caller decides whether to use the resulting warm start.
     pub fn reduce_point(&self, point: &mut Point) {
-        for rule in &self.rules {
-            match rule {
-                Rule::LpFold { columns, rows } => {
+        for record in &self.records {
+            match record {
+                Record::LpFold { columns, rows } => {
                     for group in columns {
                         let x = group_mean(&point.x, group);
                         let z = group.iter().map(|&j| point.z[j]).sum();
@@ -621,7 +648,7 @@ impl RecoveryTape {
                         point.y[group[0]] = group.iter().map(|&i| point.y[i]).sum();
                     }
                 }
-                Rule::BoundShift {
+                Record::BoundShift {
                     column,
                     other,
                     row,
@@ -634,14 +661,14 @@ impl RecoveryTape {
                     point.z[*column] += pivot * point.y[*row];
                     point.y[*row] = 0.0;
                 }
-                Rule::DoubletonChain { steps } => {
+                Record::DoubletonChain { steps } => {
                     for step in steps.iter().rev() {
                         point.z[step.parent] -= step.other * point.z[step.column] / step.pivot;
                         point.z[step.column] = 0.0;
                         point.y[step.row] = 0.0;
                     }
                 }
-                Rule::SocAggregated {
+                Record::SocAggregated {
                     column,
                     row,
                     members,
@@ -660,22 +687,22 @@ impl RecoveryTape {
                     point.y[*row] = y;
                     point.z[*column] = z;
                 }
-                Rule::ConeSlack { .. } => (),
-                Rule::PsdZeroFace { rows, order } => {
+                Record::ConeSlack { .. } => (),
+                Record::PsdZeroFace { rows, order } => {
                     for j in 0..*order {
                         point.y[rows[j * (j + 1) / 2 + j]] = 0.;
                     }
                 }
-                Rule::SocToLinear { head, tail } => {
+                Record::SocToLinear { head, tail } => {
                     let a = point.y[*head];
                     let b = point.y[*tail];
                     point.y[*head] = 0.5 * (a + b);
                     point.y[*tail] = 0.5 * (a - b);
                 }
-                Rule::SocFace { head, .. } => {
+                Record::SocFace { head, .. } => {
                     point.y[*head] = 0.;
                 }
-                Rule::RowCombination {
+                Record::RowCombination {
                     reference,
                     targets,
                     activity,
@@ -688,11 +715,11 @@ impl RecoveryTape {
                         point.y[*reference] += alpha * point.y[i];
                     }
                 }
-                Rule::Fixed { column, value, .. } => {
+                Record::Fixed { column, value, .. } => {
                     point.x[*column] = *value;
                     point.z[*column] = 0.0;
                 }
-                Rule::Substituted {
+                Record::Substituted {
                     column,
                     equation,
                     retained,
@@ -712,7 +739,7 @@ impl RecoveryTape {
                     }
                     point.z[*column] = 0.0;
                 }
-                Rule::TightenedBound {
+                Record::TightenedBound {
                     column, equation, ..
                 } => {
                     if equation.entries.len() == 1 {
@@ -720,14 +747,14 @@ impl RecoveryTape {
                         point.y[equation.row] = 0.0;
                     }
                 }
-                Rule::DependentRow { row, coefficients } => {
+                Record::DependentRow { row, coefficients } => {
                     for &(j, a) in coefficients {
                         point.y[j] += a * point.y[*row];
                     }
                     point.y[*row] = 0.0;
                 }
-                Rule::DeletedRow(row) => point.y[*row] = 0.0,
-                Rule::MergedRow {
+                Record::DeletedRow(row) => point.y[*row] = 0.0,
+                Record::MergedRow {
                     keep,
                     removed,
                     ratio,
@@ -735,7 +762,7 @@ impl RecoveryTape {
                     point.y[*keep] += point.y[*removed] / ratio;
                     point.y[*removed] = 0.;
                 }
-                Rule::TightenedRow {
+                Record::TightenedRow {
                     row,
                     source,
                     ratio,
@@ -747,7 +774,7 @@ impl RecoveryTape {
                         point.y[*source] = 0.0;
                     }
                 }
-                Rule::ParallelColumns {
+                Record::ParallelColumns {
                     keep,
                     removed,
                     ratio,
@@ -756,13 +783,13 @@ impl RecoveryTape {
                     point.x[*keep] += ratio * point.x[*removed];
                     point.z[*removed] = 0.0;
                 }
-                Rule::Unlocked { column, rows, .. } => {
+                Record::Unlocked { column, rows, .. } => {
                     point.z[*column] = 0.0;
                     for equation in rows {
                         point.y[equation.row] = 0.0;
                     }
                 }
-                Rule::Eliminated { column, .. } => point.z[*column] = 0.0,
+                Record::Eliminated { column, .. } => point.z[*column] = 0.0,
             }
         }
     }
@@ -777,8 +804,8 @@ mod tests {
         // x0 + 2*x1 >= 5 and x1 <= 2 imply x0 >= 1. Neither
         // bound need be active at an approximate interior-point solution.
         let tape = RecoveryTape {
-            rules: vec![
-                Rule::TightenedBound {
+            records: vec![
+                Record::TightenedBound {
                     column: 1,
                     side: Side::Upper,
                     old: f64::INFINITY,
@@ -791,8 +818,8 @@ mod tests {
                         },
                     }),
                 },
-                Rule::DeletedRow(1),
-                Rule::TightenedBound {
+                Record::DeletedRow(1),
+                Record::TightenedBound {
                     column: 0,
                     side: Side::Lower,
                     old: f64::NEG_INFINITY,
@@ -828,7 +855,7 @@ mod tests {
         // .5*x^T [[2,1],[1,4]]*x + [0,-10]^T*x.
         // x=(1,2), native y=-.5, z=(4.5,0) satisfies the original KKT system.
         let tape = RecoveryTape {
-            rules: vec![Rule::Substituted {
+            records: vec![Record::Substituted {
                 column: 0,
                 equation: Arc::new(Equation {
                     row: 0,
@@ -860,7 +887,7 @@ mod tests {
     fn propagated_bounds_restore_farkas_multipliers_without_a_primal_point() {
         // x0 + 2*x1 >= 5, x1 <= 2 implies x0 >= 1.
         let tape = RecoveryTape {
-            rules: vec![Rule::TightenedBound {
+            records: vec![Record::TightenedBound {
                 column: 0,
                 side: Side::Lower,
                 old: f64::NEG_INFINITY,
@@ -892,7 +919,7 @@ mod tests {
                 upper: f64::INFINITY,
             };
             let tape = RecoveryTape {
-                rules: vec![Rule::ParallelColumns {
+                records: vec![Record::ParallelColumns {
                     keep: 0,
                     removed: 1,
                     ratio,
@@ -921,15 +948,15 @@ mod tests {
     #[test]
     fn cone_slacks_are_recovered_before_earlier_variable_aggregation() {
         let tape = RecoveryTape {
-            rules: vec![
-                Rule::ParallelColumns {
+            records: vec![
+                Record::ParallelColumns {
                     keep: 0,
                     removed: 1,
                     ratio: 2.,
                     keep_bounds: Bounds::FREE,
                     removed_bounds: Bounds::FREE,
                 },
-                Rule::ConeSlack {
+                Record::ConeSlack {
                     row: 0,
                     rhs: 5.,
                     entries: vec![(0, 3.)],

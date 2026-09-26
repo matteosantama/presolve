@@ -1,240 +1,192 @@
-mod data;
-mod report;
-mod results;
-mod run;
+//! Deterministic presolve snapshots of the benchmark corpus, and their
+//! comparison.
+//!
+//! `snapshot` presolves every instance under a profile and writes one JSON
+//! record per line. `compare` diffs two snapshots and exits with status 1
+//! when statuses, outcomes, sizes, or reductions differ, 0 when only work
+//! counters or nothing differ, and 2 on error.
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
-use serde::{Deserialize, Serialize};
+use benchmark::compare::{self, Comparison};
+use benchmark::corpus;
+use benchmark::run::{self, Profile};
+use benchmark::snapshot::{self, Run};
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Kind {
-    Time,
-    Size,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum PoolMode {
-    /// Include Presolver construction in each measurement.
-    #[default]
-    Cold,
-    /// Reuse a Presolver after an untimed call on the same problem.
-    Reused,
-}
-
-#[derive(Clone, Copy, Debug, Default, ValueEnum)]
-enum Preset {
-    #[default]
-    Default,
-    /// Lift the substitution fill cap and allow Hessian growth.
-    Fill,
-    /// Use Settings::aggressive with a two-second budget unless overridden.
-    Aggressive,
-    /// Also remove the aggressive preset's equality row and column length caps.
-    Unrestricted,
-}
-impl Preset {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::Fill => "fill",
-            Self::Aggressive => "aggressive",
-            Self::Unrestricted => "unrestricted",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum SparsificationMode {
-    All,
-    Equalities,
-    Off,
-}
-impl SparsificationMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::Equalities => "equalities",
-            Self::Off => "off",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Args)]
-struct Tuning {
-    #[arg(long, value_enum, default_value_t = Preset::Default)]
-    preset: Preset,
-    /// Override the per-call soft time budget in milliseconds.
-    #[arg(long)]
-    time_limit_ms: Option<u64>,
-    #[arg(long)]
-    equality_row_limit: Option<usize>,
-    #[arg(long)]
-    equality_column_limit: Option<usize>,
-    #[arg(long)]
-    equality_pivot_relative: Option<f64>,
-    #[arg(long)]
-    equality_pivot_attempts: Option<usize>,
-    #[arg(long, action = clap::ArgAction::Set)]
-    equality_cost_aware: Option<bool>,
-    #[arg(long)]
-    propagation_relative_gain: Option<f64>,
-    #[arg(long)]
-    propagation_gain_factor: Option<f64>,
-    #[arg(long, value_enum)]
-    sparsification: Option<SparsificationMode>,
-    /// Enable these optional rule families on top of the preset (comma separated).
-    #[arg(long, value_delimiter = ',')]
-    with: Vec<String>,
-    /// Disable these rule families on top of the preset (comma separated).
-    #[arg(long, value_delimiter = ',')]
-    without: Vec<String>,
-}
-
-impl Kind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Time => "time",
-            Self::Size => "size",
-        }
-    }
-}
+use std::process::ExitCode;
+use std::time::Instant;
 
 #[derive(Parser)]
-#[command(
-    name = "benchmark",
-    about = "Measure presolve time and model size",
-    version
-)]
+#[command(about = "Presolve reduction snapshots of the benchmark corpus")]
 struct Cli {
-    /// Directory containing named time/size runs.
-    #[arg(long, global = true, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/results"))]
-    results_dir: PathBuf,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run every selected problem/rule and save results. Requires a release build.
-    Run {
-        #[command(subcommand)]
-        mode: RunCommand,
+    /// Presolve the corpus and write a snapshot.
+    Snapshot {
+        #[arg(long, value_enum, default_value = "default")]
+        profile: Profile,
+        /// Directory whose subdirectories are instance families.
+        #[arg(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/data"))]
+        data: PathBuf,
+        /// Restrict to a family; repeat for several. Default: all.
+        #[arg(long = "family")]
+        families: Vec<String>,
+        /// Skip a family's files above this many MiB on disk, as FAMILY=MIB.
+        /// Repeat for several families. Giving any limit replaces the default.
+        #[arg(long = "max-size-mib", value_name = "FAMILY=MIB", default_values = ["miplib=4"])]
+        limits: Vec<corpus::SizeLimit>,
+        /// Ignore every size limit and run the whole corpus.
+        #[arg(long, conflicts_with = "limits")]
+        all_sizes: bool,
+        /// Instances presolved concurrently; 0 means one per core.
+        #[arg(long, default_value_t = 0)]
+        jobs: usize,
+        /// Instances to list in the timing summary.
+        #[arg(long, default_value_t = 10)]
+        slowest: usize,
+        #[arg(long)]
+        out: PathBuf,
     },
-    /// Print differences between two saved runs. Negative deltas mean less time/size.
+    /// Compare two snapshots.
     Compare {
-        kind: Kind,
-        name_1: String,
-        name_2: String,
-    },
-    /// Execute a single timing trial; used by the parent process.
-    #[command(hide = true)]
-    Worker {
-        path: PathBuf,
-        rule: String,
-        #[command(flatten)]
-        tuning: Tuning,
-        #[arg(long, default_value_t = 1)]
-        threads: usize,
-        #[arg(long, value_enum, default_value_t = PoolMode::Cold)]
-        pool_mode: PoolMode,
+        base: PathBuf,
+        head: PathBuf,
+        #[arg(long, value_enum, default_value = "text")]
+        format: compare::Format,
+        /// Rows shown in the per-instance table.
+        #[arg(long, default_value_t = 100)]
+        max_rows: usize,
     },
 }
 
-#[derive(Subcommand)]
-enum RunCommand {
-    /// Measure one presolve call per fresh process; excludes loading and process startup.
-    Time {
-        #[command(flatten)]
-        selection: Selection,
-        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..))]
-        trials: u32,
-    },
-    /// Record the outcome and dimensions/nonzeros before and after presolve, once per case.
-    Size {
-        #[command(flatten)]
-        selection: Selection,
-    },
-}
-
-#[derive(Args)]
-struct Selection {
-    #[command(flatten)]
-    tuning: Tuning,
-    /// Unique run name; existing results are never overwritten.
-    #[arg(long)]
-    name: String,
-    /// Exact problem name (AFIRO) or suite/name (netlib/AFIRO). Default: all problems.
-    #[arg(long)]
-    problem: Option<String>,
-    /// Exact rule name (sparsification, singleton_rows, ...); 'all' is the full pipeline.
-    #[arg(long)]
-    rule: Option<String>,
-    /// Presolve threads: 1 is serial; 0 lets Rayon select automatically.
-    #[arg(long, default_value_t = 1)]
-    threads: usize,
-    /// Include pool setup, or measure a reused pool after an untimed warm-up.
-    #[arg(long, value_enum, default_value_t = PoolMode::Cold)]
-    pool_mode: PoolMode,
-}
-
-fn execute(cli: Cli) -> Result<()> {
-    match cli.command {
-        Command::Run { mode } => {
-            if cfg!(debug_assertions) {
-                return Err("measurement requires a release build: cargo run --release -p benchmark -- run ...".into());
+fn main() -> ExitCode {
+    match Cli::parse().command {
+        Command::Snapshot {
+            profile,
+            data,
+            families,
+            limits,
+            all_sizes,
+            jobs,
+            slowest,
+            out,
+        } => match take_snapshot(
+            profile,
+            &data,
+            &families,
+            if all_sizes { &[] } else { &limits },
+            jobs,
+            slowest,
+            &out,
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::from(2)
             }
-            match mode {
-                RunCommand::Time { selection, trials } => {
-                    run::run(&cli.results_dir, Kind::Time, selection, trials as usize)
-                }
-                RunCommand::Size { selection } => {
-                    run::run(&cli.results_dir, Kind::Size, selection, 1)
-                }
-            }
-        }
+        },
         Command::Compare {
-            kind,
-            name_1,
-            name_2,
+            base,
+            head,
+            format,
+            max_rows,
         } => {
-            let old = results::load(&cli.results_dir, kind, &name_1)?;
-            let new = results::load(&cli.results_dir, kind, &name_2)?;
-            if report::compare(&old, &new) {
-                Err("comparison has incompatible, incomplete, or failed cases; see report".into())
-            } else {
-                Ok(())
+            let read = |path: &PathBuf| {
+                snapshot::read(path).map_err(|e| format!("{}: {e}", path.display()))
+            };
+            match read(&base).and_then(|b| Ok((b, read(&head)?))) {
+                Ok((base, head)) => {
+                    let comparison = Comparison::new(&base, &head);
+                    print!("{}", comparison.render(format, max_rows));
+                    if comparison.has_changes() {
+                        ExitCode::FAILURE
+                    } else {
+                        ExitCode::SUCCESS
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::from(2)
+                }
             }
-        }
-        Command::Worker {
-            path,
-            rule,
-            tuning,
-            threads,
-            pool_mode,
-        } => {
-            if cfg!(debug_assertions) {
-                return Err("worker requires a release build".into());
-            }
-            let input = data::read(&path)?;
-            let settings = run::settings(&rule, threads, &tuning)?;
-            let result = run::measure(input, &settings, true, pool_mode)?;
-            serde_json::to_writer(std::io::stdout().lock(), &result)?;
-            Ok(())
         }
     }
 }
 
-fn main() -> std::process::ExitCode {
-    match execute(Cli::parse()) {
-        Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            std::process::ExitCode::FAILURE
+fn take_snapshot(
+    profile: Profile,
+    data: &std::path::Path,
+    families: &[String],
+    limits: &[corpus::SizeLimit],
+    jobs: usize,
+    slowest: usize,
+    out: &std::path::Path,
+) -> Result<(), String> {
+    let instances =
+        corpus::discover(data, families).map_err(|e| format!("{}: {e}", data.display()))?;
+    // With --family, a limit for a family not being run does not apply.
+    // Otherwise every limit must name a family, so a typo is an error.
+    let limits: Vec<_> = limits
+        .iter()
+        .filter(|l| families.is_empty() || families.contains(&l.family))
+        .cloned()
+        .collect();
+    let (instances, excluded) = corpus::within_limits(instances, &limits)?;
+    if !excluded.is_empty() {
+        let limits: Vec<String> = limits
+            .iter()
+            .map(|l| format!("{}={} MiB", l.family, l.mib))
+            .collect();
+        eprintln!(
+            "Skipping {} instances above the size limits {}; pass --all-sizes to include them.",
+            excluded.len(),
+            limits.join(", ")
+        );
+    }
+    if instances.is_empty() {
+        return Err(format!("no instances under {}", data.display()));
+    }
+    let start = Instant::now();
+    let outcomes = run::run(&instances, profile, jobs)?;
+    let wall = start.elapsed();
+    let mut timed: Vec<_> = outcomes
+        .iter()
+        .map(|o| (o.elapsed, o.record.instance.as_str()))
+        .collect();
+    let presolve_total: f64 = timed.iter().map(|(t, _)| t.as_secs_f64()).sum();
+    timed.sort_by(|a, b| b.cmp(a));
+    let failures: Vec<String> = outcomes
+        .iter()
+        .filter_map(|o| match &o.record.run {
+            Run::Presolved(_) => None,
+            Run::LoadError { message } => {
+                Some(format!("  {}: load error: {message}", o.record.instance))
+            }
+            Run::Panic { message } => Some(format!("  {}: panic: {message}", o.record.instance)),
+        })
+        .collect();
+    eprintln!(
+        "{} instances under the {profile:?} profile in {:.1} s wall; presolve {:.1} s summed over instances.",
+        outcomes.len(),
+        wall.as_secs_f64(),
+        presolve_total
+    );
+    if slowest > 0 {
+        eprintln!("Slowest presolve calls:");
+        for (t, instance) in timed.iter().take(slowest) {
+            eprintln!("  {:>8.3} s  {instance}", t.as_secs_f64());
         }
     }
+    if !failures.is_empty() {
+        eprintln!(
+            "{} instances failed:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+    let mut records: Vec<_> = outcomes.into_iter().map(|o| o.record).collect();
+    snapshot::write(out, &mut records).map_err(|e| format!("{}: {e}", out.display()))
 }

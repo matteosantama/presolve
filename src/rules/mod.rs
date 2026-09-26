@@ -30,8 +30,6 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Default)]
 pub(crate) struct Stats {
-    pub fast_phases: usize,
-    pub medium_phases: usize,
     pub parallel_comparisons: usize,
     pub time_limit: bool,
 }
@@ -84,6 +82,8 @@ impl Model {
 
     fn run_phases(&mut self, time: Duration, executor: &Executor) -> Result<Stats, Certificate> {
         let start = Instant::now();
+        // The entry point caps the budget, so this addition cannot overflow.
+        let deadline = start + time;
         let mut stats = Stats::default();
         // Folding needs the original symmetry before asymmetric pivot choices.
         if self.settings.rules.lp_folding && start.elapsed() < time {
@@ -95,7 +95,7 @@ impl Model {
             {
                 self.singleton_rows()?;
             }
-            self.fold_lp(start + time);
+            self.fold_lp(deadline);
         }
         let mut fast = true;
         let mut cycle_size = self.work_size();
@@ -109,19 +109,19 @@ impl Model {
             let before = self.work_size();
             let before_revision = self.revision;
             if fast {
-                stats.fast_phases += 1;
+                self.phases.fast += 1;
                 if self.settings.rules.singleton_columns {
                     self.singleton_columns();
                 }
                 self.cleanup()?;
                 if self.settings.rules.implied_free_equalities {
-                    self.implied_free_equalities(start + time);
+                    self.implied_free_equalities(deadline);
                 }
                 if self.settings.rules.doubleton_equalities {
                     self.doubleton_equalities();
                 }
                 if self.settings.rules.short_equalities {
-                    self.short_equalities(start + time);
+                    self.short_equalities(deadline);
                 }
                 self.cleanup()?;
                 // Repeat fast phases under the selected progress policy,
@@ -133,19 +133,19 @@ impl Model {
                     before_revision != self.revision,
                 );
             } else {
-                stats.medium_phases += 1;
+                self.phases.medium += 1;
                 if self.settings.rules.bound_propagation {
-                    self.propagate_rounds(start + time)?;
+                    self.propagate_rounds(deadline)?;
                 }
                 if self.settings.rules.dual_fixing {
                     self.coupled_dual_fix();
                 }
                 self.cleanup()?;
                 if self.settings.rules.implied_free_equalities {
-                    self.implied_free_equalities(start + time);
+                    self.implied_free_equalities(deadline);
                 }
                 if self.settings.rules.short_equalities {
-                    self.short_equalities(start + time);
+                    self.short_equalities(deadline);
                 }
                 self.cleanup()?;
                 if self.settings.rules.parallel_rows {
@@ -188,14 +188,12 @@ impl Model {
             }
         }
         if !stats.time_limit && self.settings.rules.equality_dependencies {
-            let deadline = start + time;
             if self.equality_dependencies(deadline)? > 0 {
                 self.sparsify_cleanup(deadline)?;
             }
             stats.time_limit = Instant::now() >= deadline;
         }
         if !stats.time_limit && self.settings.rules.sparsification {
-            let deadline = start + time;
             if self.sparsify_rows(deadline) > 0 {
                 self.sparsify_cleanup(deadline)?;
             }
@@ -208,14 +206,12 @@ impl Model {
         // Visit them before dual propagation, while the independent switches
         // continue to control every consequence rule.
         if !stats.time_limit && self.settings.rules.implied_free_equalities {
-            let deadline = start + time;
             if self.implied_free_equalities(deadline) > 0 {
                 self.substitution_cleanup(deadline)?;
             }
             stats.time_limit = Instant::now() >= deadline;
         }
         if !stats.time_limit && self.settings.rules.bound_shift {
-            let deadline = start + time;
             if self.bound_shift(deadline) > 0 {
                 self.substitution_cleanup(deadline)?;
             }
@@ -225,7 +221,6 @@ impl Model {
         // are exposed only now, and one pass here finds what repeated passes
         // in the medium phases would, without their per-phase sweeps.
         if !stats.time_limit && self.settings.rules.dual_propagation {
-            let deadline = start + time;
             if self.dual_propagation()? > 0 {
                 // Drain the direct consequences only: new equalities feed the
                 // substitution rules and fixed columns feed cleanup. A further

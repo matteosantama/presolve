@@ -2,6 +2,7 @@
 // Modified for this library; copyright and attribution notices are in NOTICE.
 //! Propagate implied bounds and remove redundant variable bounds.
 
+use crate::result::RuleId;
 use crate::{
     model::{
         Model, RowDomain,
@@ -16,6 +17,7 @@ impl Model {
     /// One medium-phase propagation round. Each bound proof owns the equation
     /// used to derive it; follow-up structural changes cannot invalidate tape.
     pub fn propagate_bounds(&mut self) -> Result<usize, Certificate> {
+        self.enter(RuleId::BoundPropagation);
         let mut tightened = 0;
         for i in self.queues.changed_activities.take_round() {
             let RowDomain::Linear(original_bounds) = self.rows[i] else {
@@ -107,6 +109,7 @@ impl Model {
     /// so implied bounds help rules without becoming extra barrier terms.
     /// Recompute implications as bounds are removed to avoid circular proofs.
     pub fn remove_redundant_bounds(&mut self) {
+        self.enter(RuleId::RedundantBounds);
         let mut columns: Vec<_> = (0..self.bounds.len())
             .filter(|&j| {
                 self.alive[j]

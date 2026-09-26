@@ -7,7 +7,7 @@ use crate::{
     matrix::sparse::Entries,
     model::{
         Model, RowDomain, shifted,
-        tape::{DoubletonStep, Rule},
+        tape::{DoubletonStep, Record},
     },
     problem::Bounds,
 };
@@ -292,7 +292,7 @@ impl Model {
         self.objective.c[root] = cost;
         self.objective.constant = constant;
         self.replace_rows_batch(updates);
-        self.postsolve.rules.push(Rule::DoubletonChain { steps });
+        self.record(Record::DoubletonChain { steps });
         true
     }
 }
@@ -409,7 +409,7 @@ mod tests {
                     .sum::<f64>();
             model.batch_doubleton_chains(&(0..16).collect::<Vec<_>>());
             assert!(
-                matches!(model.postsolve.rules.as_slice(),[Rule::DoubletonChain{steps}] if steps.len()==16)
+                matches!(model.postsolve.records.as_slice(),[Record::DoubletonChain{steps}] if steps.len()==16)
             );
             assert_eq!(model.alive.iter().filter(|&&a| a).count(), 2);
             assert_eq!(model.a.nnz(), 4);
@@ -539,7 +539,7 @@ mod tests {
             );
             assert_eq!(model.revision, revision, "variant {variant}");
             assert_eq!(model.objective.c, c);
-            assert!(model.postsolve.rules.is_empty());
+            assert!(model.postsolve.records.is_empty());
             assert!(model.alive.iter().all(|&x| x));
         }
     }
@@ -577,8 +577,8 @@ mod tests {
         );
         model.batch_doubleton_chains(&(0..n - 1).collect::<Vec<_>>());
         assert!(matches!(
-            model.postsolve.rules.first(),
-            Some(Rule::DoubletonChain { .. })
+            model.postsolve.records.first(),
+            Some(Record::DoubletonChain { .. })
         ));
         let mut certificate = model
             .singleton_rows()
@@ -637,16 +637,16 @@ mod tests {
             model.settings.substitution_fill = limit;
             model.batch_doubleton_chains(&(0..n - 1).collect::<Vec<_>>());
             assert_eq!(model.revision, 0);
-            assert!(model.postsolve.rules.is_empty());
+            assert!(model.postsolve.records.is_empty());
             assert!(model.alive.iter().all(|&alive| alive));
             model.doubleton_equalities();
             assert_eq!(model.alive.iter().filter(|&&alive| alive).count(), 1);
             assert!(
                 model
                     .postsolve
-                    .rules
+                    .records
                     .iter()
-                    .all(|r| !matches!(r, Rule::DoubletonChain { .. }))
+                    .all(|r| !matches!(r, Record::DoubletonChain { .. }))
             );
         }
     }

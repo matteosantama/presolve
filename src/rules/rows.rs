@@ -2,6 +2,7 @@
 // Modified for this library; copyright and attribution notices are in NOTICE.
 //! Eliminate empty rows and turn singleton rows into variable bounds.
 
+use crate::result::RuleId;
 use crate::{
     model::tape::{Certificate, Side},
     model::{Model, RowDomain},
@@ -9,6 +10,7 @@ use crate::{
 
 impl Model {
     pub fn empty_rows(&mut self) -> Result<(), Certificate> {
+        self.enter(RuleId::EmptyRows);
         while let Some(i) = self.queues.empty_rows.pop() {
             let RowDomain::Linear(b) = self.rows[i] else {
                 continue;
@@ -31,6 +33,7 @@ impl Model {
     }
 
     pub fn singleton_rows(&mut self) -> Result<(), Certificate> {
+        self.enter(RuleId::SingletonRows);
         while let Some(i) = self.queues.singleton_rows.pop() {
             if self.a.row(i).len() != 1 {
                 continue;
