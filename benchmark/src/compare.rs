@@ -187,7 +187,7 @@ impl Comparison {
             "No reduction changes"
         };
         if md {
-            let _ = writeln!(out, "## {verdict}\n");
+            let _ = writeln!(out, "**{verdict}.**\n");
         } else {
             let _ = writeln!(out, "{verdict}.");
         }
@@ -225,7 +225,7 @@ impl Comparison {
         }
         let section = |out: &mut String, title: &str| {
             if md {
-                let _ = writeln!(out, "\n### {title}\n");
+                let _ = writeln!(out, "\n#### {title}\n");
             } else {
                 let _ = writeln!(out, "\n{title}");
             }
@@ -593,7 +593,8 @@ mod tests {
         assert_eq!(c.deltas[0].head, json!("panic: index out of bounds"));
         assert!(c.fields_only_base.is_empty());
         let md = c.render(Format::Markdown, 10);
-        assert!(md.starts_with("## Reductions changed\n"), "{md}");
+        assert!(md.starts_with("**Reductions changed.**\n"), "{md}");
+        assert!(md.contains("\n#### Outcomes\n"), "{md}");
         assert!(md.contains("| reduced | 1 | 0 | -1 | -100.00% |"), "{md}");
         assert!(md.contains("| panic | 0 | 1 | +1 | new |"), "{md}");
     }

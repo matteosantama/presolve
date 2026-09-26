@@ -667,6 +667,21 @@ aggressive` uses `Settings::aggressive`, `--family` restricts the run, and
 `--format markdown` suits CI summaries. Snapshots depend on the platform, so
 compare only snapshots taken on the same machine.
 
+`benchmark/compare-trees.sh BASE_TREE HEAD_TREE OUT_DIR` builds the benchmark
+binary from two source trees, snapshots both profiles with each against the
+head tree's corpus, and compares them. For example, against a worktree of
+`main`:
+
+```sh
+git worktree add ../presolve-main main
+benchmark/compare-trees.sh ../presolve-main . benchmark/results/compare
+```
+
+The Reductions workflow runs the same script on every pull request, on Linux
+x86, Linux arm, and macOS arm runners, and writes the comparison to the job
+summary. It fails when reductions change, unless the pull request carries the
+`reductions-change` label that accepts the change.
+
 Time presolve only with the workspace release profile, which builds one
 codegen unit with full link-time optimization. With the default sixteen
 units, code placement alone moves corpus timings by about 1% between builds,
