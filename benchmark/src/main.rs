@@ -5,15 +5,18 @@
 //! record per line. `compare` diffs two snapshots and exits with status 1
 //! when statuses, outcomes, sizes, or reductions differ, 0 when only work
 //! counters or nothing differ, and 2 on error. `verify` checks presolve
-//! against Clarabel and exits with status 1 when an instance fails.
+//! against Clarabel and exits with status 1 when an instance fails. `profile`
+//! presolves one instance repeatedly, for running under a profiler.
 
 use benchmark::allocations::Counting;
 use benchmark::compare::{self, Comparison};
 use benchmark::corpus;
+use benchmark::mps;
 use benchmark::run::{self, Profile};
 use benchmark::snapshot::{self, Run};
 use benchmark::verify;
 use clap::{Parser, Subcommand};
+use presolve::Presolver;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
@@ -75,6 +78,21 @@ enum Command {
         time_limit: f64,
         #[arg(long)]
         out: PathBuf,
+    },
+    /// Presolve one instance repeatedly, for running under a profiler.
+    /// Loading happens once; each call presolves a fresh copy.
+    Profile {
+        /// The instance, as FAMILY/NAME.
+        #[arg(long)]
+        instance: String,
+        #[arg(long, value_enum, default_value = "default")]
+        profile: Profile,
+        /// Directory whose subdirectories are instance families.
+        #[arg(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/data"))]
+        data: PathBuf,
+        /// Presolve calls to make.
+        #[arg(long, default_value_t = 20)]
+        repeat: usize,
     },
     /// Compare two snapshots.
     Compare {
@@ -141,6 +159,18 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Command::Profile {
+            instance,
+            profile,
+            data,
+            repeat,
+        } => match profile_instance(&data, &instance, profile, repeat) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::from(2)
+            }
+        },
         Command::Compare {
             base,
             head,
@@ -252,4 +282,37 @@ fn select(
         return Err(format!("no instances under {}", data.display()));
     }
     Ok(instances)
+}
+
+/// Presolve `instance` `repeat` times and report the time of each call.
+fn profile_instance(
+    data: &std::path::Path,
+    instance: &str,
+    profile: Profile,
+    repeat: usize,
+) -> Result<(), String> {
+    let instance = corpus::find(data, instance).map_err(|e| format!("{}: {e}", data.display()))?;
+    let problem = mps::read(&instance.path).map_err(|e| format!("{}: {e}", instance.id()))?;
+    let presolver = Presolver::new(profile.settings()).map_err(|e| e.to_string())?;
+    let mut times = Vec::with_capacity(repeat);
+    for _ in 0..repeat {
+        let input = problem.clone();
+        let start = Instant::now();
+        let result = presolver.presolve(input);
+        times.push(start.elapsed());
+        drop(std::hint::black_box(result));
+    }
+    times.sort();
+    if let (Some(min), Some(max)) = (times.first(), times.last()) {
+        let total: std::time::Duration = times.iter().sum();
+        eprintln!(
+            "{} under the {profile:?} profile, {repeat} calls: min {:.3} ms, median {:.3} ms, max {:.3} ms, total {:.2} s.",
+            instance.id(),
+            min.as_secs_f64() * 1e3,
+            times[times.len() / 2].as_secs_f64() * 1e3,
+            max.as_secs_f64() * 1e3,
+            total.as_secs_f64()
+        );
+    }
+    Ok(())
 }

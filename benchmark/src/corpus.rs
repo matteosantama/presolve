@@ -82,6 +82,20 @@ pub fn discover(data: &Path, families: &[String]) -> io::Result<Vec<Instance>> {
     Ok(instances)
 }
 
+/// The instance `family/name` under `data`.
+pub fn find(data: &Path, id: &str) -> io::Result<Instance> {
+    let (family, name) = id.split_once('/').ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("expected FAMILY/NAME, got {id:?}"),
+        )
+    })?;
+    discover(data, &[family.to_string()])?
+        .into_iter()
+        .find(|i| i.name == name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no instance {id}")))
+}
+
 /// A size limit for one family, in whole MiB of file size on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SizeLimit {
@@ -168,6 +182,10 @@ mod tests {
         assert!(missing.to_string().starts_with("family c"), "{missing}");
         let sized = discover(&data, &[]).unwrap();
         assert!(sized.iter().all(|i| i.bytes == 0));
+        assert_eq!(find(&data, "b/PILOT.JA").unwrap().id(), "b/PILOT.JA");
+        for missing in ["b/w", "c/x", "x"] {
+            assert!(find(&data, missing).is_err(), "{missing}");
+        }
         std::fs::write(data.join("a").join("z.mps"), "").unwrap();
         let clash = discover(&data, &[]).unwrap_err();
         assert!(

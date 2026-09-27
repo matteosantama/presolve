@@ -6,6 +6,10 @@ resolver = "3"
 codegen-units = 1
 lto = "fat"
 
+[profile.profiling]
+inherits = "release"
+debug = true
+
 [package]
 name = "presolve"
 version = "0.1.0"
