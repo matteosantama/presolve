@@ -4,13 +4,15 @@
 //! `snapshot` presolves every instance under a profile and writes one JSON
 //! record per line. `compare` diffs two snapshots and exits with status 1
 //! when statuses, outcomes, sizes, or reductions differ, 0 when only work
-//! counters or nothing differ, and 2 on error.
+//! counters or nothing differ, and 2 on error. `verify` checks presolve
+//! against Clarabel and exits with status 1 when an instance fails.
 
 use benchmark::allocations::Counting;
 use benchmark::compare::{self, Comparison};
 use benchmark::corpus;
 use benchmark::run::{self, Profile};
 use benchmark::snapshot::{self, Run};
+use benchmark::verify;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -54,6 +56,26 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Check presolve and postsolve against Clarabel and write the verdicts.
+    Verify {
+        #[arg(long, value_enum, default_value = "default")]
+        profile: Profile,
+        #[arg(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/data"))]
+        data: PathBuf,
+        #[arg(long = "family")]
+        families: Vec<String>,
+        #[arg(long = "max-size-mib", value_name = "FAMILY=MIB", default_values = ["miplib=4"])]
+        limits: Vec<corpus::SizeLimit>,
+        #[arg(long, conflicts_with = "limits")]
+        all_sizes: bool,
+        #[arg(long, default_value_t = 0)]
+        jobs: usize,
+        /// Seconds allowed for each Clarabel solve.
+        #[arg(long, default_value_t = 60.0)]
+        time_limit: f64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Compare two snapshots.
     Compare {
         base: PathBuf,
@@ -92,6 +114,33 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        Command::Verify {
+            profile,
+            data,
+            families,
+            limits,
+            all_sizes,
+            jobs,
+            time_limit,
+            out,
+        } => {
+            let limits = if all_sizes { &[][..] } else { &limits };
+            let run = select(&data, &families, limits).and_then(|instances| {
+                let start = Instant::now();
+                let mut records = verify::run(&instances, profile, jobs, time_limit)?;
+                eprint!("{}", verify::summarize(&records, profile, start.elapsed()));
+                verify::write(&out, &mut records).map_err(|e| format!("{}: {e}", out.display()))?;
+                Ok(records.iter().any(|r| r.verdict == verify::Verdict::Fail))
+            });
+            match run {
+                Ok(false) => ExitCode::SUCCESS,
+                Ok(true) => ExitCode::FAILURE,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::from(2)
+                }
+            }
+        }
         Command::Compare {
             base,
             head,
@@ -129,30 +178,7 @@ fn take_snapshot(
     slowest: usize,
     out: &std::path::Path,
 ) -> Result<(), String> {
-    let instances =
-        corpus::discover(data, families).map_err(|e| format!("{}: {e}", data.display()))?;
-    // With --family, a limit for a family not being run does not apply.
-    // Otherwise every limit must name a family, so a typo is an error.
-    let limits: Vec<_> = limits
-        .iter()
-        .filter(|l| families.is_empty() || families.contains(&l.family))
-        .cloned()
-        .collect();
-    let (instances, excluded) = corpus::within_limits(instances, &limits)?;
-    if !excluded.is_empty() {
-        let limits: Vec<String> = limits
-            .iter()
-            .map(|l| format!("{}={} MiB", l.family, l.mib))
-            .collect();
-        eprintln!(
-            "Skipping {} instances above the size limits {}; pass --all-sizes to include them.",
-            excluded.len(),
-            limits.join(", ")
-        );
-    }
-    if instances.is_empty() {
-        return Err(format!("no instances under {}", data.display()));
-    }
+    let instances = select(data, families, limits)?;
     let start = Instant::now();
     let outcomes = run::run(&instances, profile, jobs)?;
     let wall = start.elapsed();
@@ -193,4 +219,37 @@ fn take_snapshot(
     }
     let mut records: Vec<_> = outcomes.into_iter().map(|o| o.record).collect();
     snapshot::write(out, &mut records).map_err(|e| format!("{}: {e}", out.display()))
+}
+
+/// Instances under `data` in `families` within the size `limits`.
+fn select(
+    data: &std::path::Path,
+    families: &[String],
+    limits: &[corpus::SizeLimit],
+) -> Result<Vec<corpus::Instance>, String> {
+    let instances =
+        corpus::discover(data, families).map_err(|e| format!("{}: {e}", data.display()))?;
+    // With --family, a limit for a family not being run does not apply.
+    // Otherwise every limit must name a family, so a typo is an error.
+    let limits: Vec<_> = limits
+        .iter()
+        .filter(|l| families.is_empty() || families.contains(&l.family))
+        .cloned()
+        .collect();
+    let (instances, excluded) = corpus::within_limits(instances, &limits)?;
+    if !excluded.is_empty() {
+        let limits: Vec<String> = limits
+            .iter()
+            .map(|l| format!("{}={} MiB", l.family, l.mib))
+            .collect();
+        eprintln!(
+            "Skipping {} instances above the size limits {}; pass --all-sizes to include them.",
+            excluded.len(),
+            limits.join(", ")
+        );
+    }
+    if instances.is_empty() {
+        return Err(format!("no instances under {}", data.display()));
+    }
+    Ok(instances)
 }

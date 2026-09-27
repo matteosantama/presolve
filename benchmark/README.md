@@ -21,5 +21,8 @@ CI fails when reductions change. `benchmark/compare-instructions.sh` does the
 same for the Callgrind instruction counts of `cargo bench -p benchmark --bench
 presolve` (Linux with Valgrind); CI fails when one rises by more than 1%.
 
+`verify --out FILE` takes the same selection flags as `snapshot`, checks each
+recovered solution against Clarabel on the original, and exits 1 on a failure.
+
 Time presolve only with the workspace release profile (one codegen unit, fat
 LTO).
