@@ -25,6 +25,8 @@ pub struct Delta {
     pub path: String,
     pub base: Value,
     pub head: Value,
+    /// For a size after presolve, the same field before presolve.
+    pub before: Option<Value>,
 }
 impl Delta {
     pub fn is_work(&self) -> bool {
@@ -51,6 +53,7 @@ pub struct Comparison {
 #[derive(Debug, Default)]
 struct Totals {
     reductions: BTreeMap<String, i128>,
+    before: BTreeMap<String, i128>,
     after: BTreeMap<String, i128>,
     outcomes: BTreeMap<String, i128>,
     work: BTreeMap<String, i128>,
@@ -92,11 +95,18 @@ impl Comparison {
                     path: "status".into(),
                     base: status_summary(b),
                     head: status_summary(h),
+                    before: None,
                 });
                 continue;
             }
+            let first = c.deltas.len();
             let mut path = Vec::new();
             c.diff(instance, &mut path, Some(b), Some(h), false, &empty);
+            for delta in &mut c.deltas[first..] {
+                if let Some(field) = delta.path.strip_prefix("after.") {
+                    delta.before = h["before"].get(field).cloned();
+                }
+            }
         }
         c
     }
@@ -152,6 +162,7 @@ impl Comparison {
             path: path.join("."),
             base,
             head,
+            before: None,
         });
     }
 
@@ -258,12 +269,22 @@ impl Comparison {
         }
         section(
             &mut out,
-            "Size after presolve, summed over instances presolved on both sides",
+            "Size before and after presolve, summed over instances presolved on both sides",
         );
+        let mut rows = totals(&self.base.after, &self.head.after, true);
+        for row in &mut rows {
+            let field = &row[0];
+            let (b, h) = (self.base.before.get(field), self.head.before.get(field));
+            let before = match (b, h) {
+                (Some(b), Some(h)) if b == h => b.to_string(),
+                _ => format!("{} / {}", b.copied().unwrap_or(0), h.copied().unwrap_or(0)),
+            };
+            row.insert(1, before);
+        }
         out += &table(
             md,
-            &with_first(&columns, "field"),
-            &totals(&self.base.after, &self.head.after, true),
+            &["field", "before", "base", "head", "delta", "change"],
+            &rows,
         );
         let rows = totals(&self.base.reductions, &self.head.reductions, false);
         if !rows.is_empty() {
@@ -285,6 +306,7 @@ impl Comparison {
                     vec![
                         d.instance.clone(),
                         d.path.clone(),
+                        d.before.as_ref().map(compact).unwrap_or_default(),
                         compact(&d.base),
                         compact(&d.head),
                         delta,
@@ -297,7 +319,7 @@ impl Comparison {
             section(&mut out, "Changed instances");
             out += &capped(
                 md,
-                &["instance", "field", "base", "head", "delta"],
+                &["instance", "field", "before", "base", "head", "delta"],
                 rows,
                 max_rows,
             );
@@ -315,7 +337,8 @@ impl Comparison {
 }
 
 impl Totals {
-    /// Count `record`, and its size after presolve when `sizes` is set.
+    /// Count `record`, and its sizes before and after presolve when `sizes`
+    /// is set.
     fn add(&mut self, record: &Value, sizes: bool) {
         let label = match (record["status"].as_str(), record["outcome"].as_str()) {
             (Some("presolved"), Some(outcome)) => outcome.to_string(),
@@ -325,6 +348,7 @@ impl Totals {
         *self.outcomes.entry(label).or_default() += 1;
         sum_leaves("", &record["reductions"], &mut self.reductions);
         if sizes {
+            sum_leaves("", &record["before"], &mut self.before);
             sum_leaves("", &record["after"], &mut self.after);
         }
         sum_leaves("", &record["work"], &mut self.work);
@@ -612,6 +636,46 @@ mod tests {
         assert!(c.fields_only_base.is_empty());
         // The instance has no size on one side, so neither side sums it.
         assert!(c.base.after.is_empty() && c.head.after.is_empty());
+    }
+
+    #[test]
+    fn sizes_before_presolve_are_shown_beside_sizes_after() {
+        let with_before = |after: u64, before: u64| {
+            let mut record = presolved(after, json!({}), 1);
+            record["before"] = json!({"variables": before, "a_nonzeros": 30});
+            record
+        };
+        let base = snapshot(&[("a/x", with_before(3, 10)), ("a/y", with_before(4, 5))]);
+        let head = snapshot(&[("a/x", with_before(2, 10)), ("a/y", with_before(4, 5))]);
+        let c = Comparison::new(&base, &head);
+        assert_eq!(c.deltas.len(), 1);
+        assert_eq!(c.deltas[0].path, "after.variables");
+        assert_eq!(c.deltas[0].before, Some(json!(10)));
+        let md = c.render(Format::Markdown, 10);
+        assert!(
+            md.contains("| field | before | base | head | delta | change |"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| variables | 15 | 7 | 6 | -1 | -14.29% |"),
+            "{md}"
+        );
+        assert!(md.contains("| a_nonzeros | 60 | 20 | 20 | 0 |  |"), "{md}");
+        assert!(
+            md.contains("| a/x | after.variables | 10 | 3 | 2 | -1 |"),
+            "{md}"
+        );
+        // Sides that disagree on the input size show both totals.
+        let head = snapshot(&[("a/x", with_before(2, 12)), ("a/y", with_before(4, 5))]);
+        let md = Comparison::new(&base, &head).render(Format::Markdown, 10);
+        assert!(
+            md.contains("| variables | 15 / 17 | 7 | 6 | -1 | -14.29% |"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| a/x | before.variables |  | 10 | 12 | +2 |"),
+            "{md}"
+        );
     }
 
     #[test]
