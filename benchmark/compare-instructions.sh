@@ -84,9 +84,9 @@ join -t $'\t' -a 1 -a 2 -e - -o 0,1.2,2.2 "$out/base.tsv" "$out/head.tsv" | awk 
     -v max="$max_increase" -v summary="$summary" '
     BEGIN { status = 0 }
     {
-        if ($2 == "-") change = "new"
-        else if ($3 == "-") change = "removed"
-        else if ($2 == 0 || $3 == 0) { change = "no count"; status = 2 }
+        if ($3 == "-") change = "removed"
+        else if ($3 == 0 || $2 == 0) { change = "no count"; status = 2 }
+        else if ($2 == "-") change = "new"
         else {
             pct = ($3 - $2) * 100 / $2
             change = sprintf("%+.3f%%", pct)
@@ -109,6 +109,7 @@ set -e
 if [ "$missing" -eq 1 ]; then
     printf '\nThe base tree has no instruction count benches, so there is nothing to compare.\n' \
         | tee -a "$summary" >&2
+    [ "$status" -eq 2 ] && exit 2
     exit 3
 fi
 exit "$status"
