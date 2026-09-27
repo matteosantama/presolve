@@ -71,7 +71,7 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         jobs: usize,
         /// Seconds allowed for each Clarabel solve.
-        #[arg(long, default_value_t = 60.0)]
+        #[arg(long, default_value_t = 30.0)]
         time_limit: f64,
         #[arg(long)]
         out: PathBuf,

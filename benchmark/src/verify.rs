@@ -27,10 +27,10 @@
 //! tolerance exceeds [`LIMIT`].
 //!
 //! Postsolve can amplify the solver's residuals, for example through a
-//! bound relaxed because rows imply it, so an instance that does not pass
-//! is verified again with Clarabel at [`TIGHT`], unless it hit the time
-//! limit or failed in a way no solve can change; the second verdict stands
-//! unless it is inconclusive.
+//! bound relaxed because rows imply it, so an instance that fails a check
+//! or a status comparison is verified again with Clarabel at [`TIGHT`]; the
+//! second verdict stands unless it is inconclusive. Inconclusive instances
+//! are not retried.
 
 use crate::checks::{Measures, Model};
 use crate::corpus::Instance;
@@ -56,7 +56,7 @@ pub const FACTOR: f64 = 10.0;
 /// The largest meaningful tolerance.
 pub const LIMIT: f64 = 1e-3;
 /// Clarabel's gap, feasibility and infeasibility tolerance, first as by
-/// default, then for instances that do not pass.
+/// default, then for instances that fail.
 pub const DEFAULT: f64 = 1e-8;
 pub const TIGHT: f64 = 1e-10;
 
@@ -210,11 +210,7 @@ impl Record {
 
     /// Whether a more accurate solve could change the verdict.
     fn retryable(&self) -> bool {
-        self.verdict != Verdict::Pass
-            && !self
-                .reason
-                .as_deref()
-                .is_some_and(|r| r.contains("MaxTime"))
+        self.verdict == Verdict::Fail
             && self.failures.iter().all(|f| {
                 !matches!(
                     f.check,
