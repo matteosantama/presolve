@@ -198,6 +198,18 @@ pub(crate) enum Record {
         ratio: f64,
         side: Side,
     },
+    /// A reduction relied on `equation` implying this finite `side` of
+    /// `column`, which stays in the model. Reversal moves any multiplier on
+    /// that side into the row, so the reduction may treat the side as absent.
+    /// A dual transformation only; it is not counted as a reduction. The
+    /// saved row may also hold columns fixed between saving it and this
+    /// record; their `Fixed` records are reversed later and overwrite the
+    /// multipliers this moves onto them.
+    ImpliedSide {
+        column: usize,
+        equation: Arc<Equation>,
+        side: Side,
+    },
     ParallelColumns {
         keep: usize,
         removed: usize,
@@ -222,8 +234,9 @@ pub(crate) enum Record {
     },
 }
 impl Record {
-    pub(crate) fn kind(&self) -> ReductionKind {
-        match self {
+    /// The reduction this record counts as, if it is one.
+    pub(crate) fn kind(&self) -> Option<ReductionKind> {
+        Some(match self {
             Self::LpFold { .. } => ReductionKind::LpFold,
             Self::BoundShift { .. } => ReductionKind::BoundShift,
             Self::DoubletonChain { .. } => ReductionKind::DoubletonChain,
@@ -243,7 +256,8 @@ impl Record {
             Self::ParallelColumns { .. } => ReductionKind::ParallelColumns,
             Self::Unlocked { .. } => ReductionKind::Unlocked,
             Self::Eliminated { .. } => ReductionKind::Eliminated,
-        }
+            Self::ImpliedSide { .. } => return None,
+        })
     }
 }
 
@@ -274,6 +288,17 @@ impl Point {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RecoveryTape {
     pub records: Vec<Record>,
+}
+
+/// Move the multiplier `z` of `column` onto the saved row, whose columns
+/// all have their multipliers at this point of the reversal.
+fn move_to_row(point: &mut Point, column: usize, equation: &Equation, z: f64) {
+    let theta = z / equation.coefficient(column);
+    point.y[equation.row] += theta;
+    for &(j, a) in &equation.entries {
+        point.z[j] -= a * theta;
+    }
+    point.z[column] = 0.0;
 }
 
 fn active(x: f64, bound: f64) -> bool {
@@ -538,14 +563,23 @@ impl RecoveryTape {
                     // Interior-point iterates have nonzero multipliers even
                     // away from an active bound. Transfer those too: dropping
                     // them would lose stationarity in the original problem.
-                    let theta = z / equation.coefficient(*column);
-                    point.y[equation.row] += theta;
-                    // At this point every column of the saved row has been
-                    // restored. No sentinel-based omission of other multipliers.
-                    for &(j, a) in &equation.entries {
-                        point.z[j] -= a * theta;
+                    move_to_row(point, *column, equation, z);
+                }
+                Record::ImpliedSide {
+                    column,
+                    equation,
+                    side,
+                } => {
+                    // Unconditional, unlike a tightened bound: the side is
+                    // still the column's own, but the reduction needed it to
+                    // carry no multiplier. The row is tight wherever an exact
+                    // solution uses the side, with every other column at the
+                    // bound the implication takes, so each moved multiplier
+                    // gets that bound's sign.
+                    let z = point.z[*column];
+                    if mode.dual() && side.used(z) {
+                        move_to_row(point, *column, equation, z);
                     }
-                    point.z[*column] = 0.0;
                 }
                 Record::TightenedRow {
                     row,
@@ -790,6 +824,8 @@ impl RecoveryTape {
                     }
                 }
                 Record::Eliminated { column, .. } => point.z[*column] = 0.0,
+                // Any multiplier is valid on a side the model keeps.
+                Record::ImpliedSide { .. } => (),
             }
         }
     }
