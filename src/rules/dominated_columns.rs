@@ -4,9 +4,14 @@
 //! keeps every row feasible and never increases a linear objective, so a
 //! feasible point can slide until the dominated variable reaches its bound.
 
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    sync::Arc,
+};
+
 use crate::result::RuleId;
 use crate::{
-    model::tape::{Certificate, Side},
+    model::tape::{Certificate, Equation, Record, Side},
     model::{Model, RowDomain},
     problem::Bounds,
 };
@@ -32,6 +37,17 @@ const UNKNOWN_FINGERPRINT: u64 = u64::MAX;
 pub(crate) struct DominatedScratch {
     fingerprints: Vec<u64>,
     open: Vec<u8>,
+    /// The row that proved each implied open side, keyed by `side_key`.
+    implying: HashMap<usize, usize>,
+    /// Implying rows saved for recovery, one copy per row and pass. Only
+    /// fixes change the model during a pass, so a saved row differs from the
+    /// current one only by columns fixed since. Their `Fixed` records are
+    /// reversed after any record citing the row and overwrite those multipliers.
+    saved: HashMap<usize, Arc<Equation>>,
+}
+
+fn side_key(j: usize, side: Side) -> usize {
+    2 * j + usize::from(side == Side::Lower)
 }
 
 impl DominatedScratch {
@@ -44,7 +60,7 @@ impl DominatedScratch {
 
     fn open(&mut self, model: &mut Model, j: usize) -> u8 {
         if self.open[j] & KNOWN == 0 {
-            self.open[j] = model.open_sides(j) | KNOWN;
+            self.open[j] = model.open_sides(j, &mut self.implying) | KNOWN;
         }
         self.open[j]
     }
@@ -70,12 +86,16 @@ impl Model {
     /// A side is open when it is infinite or a row already implies it: the
     /// shifted point satisfies every row and every other bound, hence that
     /// side too. Cached activities only; a cancellation-prone row is skipped
-    /// rather than recomputed, which is conservative.
-    fn open_sides(&mut self, j: usize) -> u8 {
+    /// rather than recomputed, which is conservative. The proving row of an
+    /// implied side is kept for recovery.
+    fn open_sides(&mut self, j: usize, implying: &mut HashMap<usize, usize>) -> u8 {
         let mut open = 0;
         for (side, flag) in [(Side::Upper, UPPER_OPEN), (Side::Lower, LOWER_OPEN)] {
-            if !side.value(self.bounds[j]).is_finite() || self.bound_implied(j, side, false) {
+            if !side.value(self.bounds[j]).is_finite() {
                 open |= flag;
+            } else if let Some(row) = self.implying_row(j, side, false) {
+                open |= flag;
+                implying.insert(side_key(j, side), row);
             }
         }
         open
@@ -188,23 +208,51 @@ impl Model {
         }
         let up = self.bounds[dominant].upper;
         let down = self.bounds[dominated].lower;
-        let (column, value) = if down.is_finite() && scratch.open(self, dominant) & UPPER_OPEN != 0
-        {
-            (dominated, down)
-        } else if up.is_finite() && scratch.open(self, dominated) & LOWER_OPEN != 0 {
-            (dominant, up)
-        } else {
-            if self.objective.c[dominant] == self.objective.c[dominated] {
+        // The shift stops when `column` reaches `value`; `other` moves
+        // toward its open `side`.
+        let (column, value, other, side) =
+            if down.is_finite() && scratch.open(self, dominant) & UPPER_OPEN != 0 {
+                (dominated, down, dominant, Side::Upper)
+            } else if up.is_finite() && scratch.open(self, dominated) & LOWER_OPEN != 0 {
+                (dominant, up, dominated, Side::Lower)
+            } else {
+                if self.objective.c[dominant] == self.objective.c[dominated] {
+                    return Ok(None);
+                }
+                return Err(self.dual_certificate([(dominant, 1.0), (dominated, -1.0)]));
+            };
+        // The fixed column's reduced cost has the needed sign only when
+        // `other` carries no multiplier on `side`. A finite side is implied
+        // by a row, which then takes over any such multiplier in recovery.
+        let proof = if side.value(self.bounds[other]).is_finite() {
+            let Some(&row) = scratch.implying.get(&side_key(other, side)) else {
                 return Ok(None);
-            }
-            return Err(self.dual_certificate([(dominant, 1.0), (dominated, -1.0)]));
-        };
-        if self.fix(column, value) {
-            scratch.fingerprints[column] = UNKNOWN_FINGERPRINT;
-            Ok(Some(column))
+            };
+            let equation = match scratch.saved.entry(row) {
+                Entry::Occupied(saved) => Arc::clone(saved.get()),
+                Entry::Vacant(slot) => {
+                    let Some(equation) = self.equation(row) else {
+                        return Ok(None);
+                    };
+                    Arc::clone(slot.insert(equation))
+                }
+            };
+            Some(equation)
         } else {
-            Ok(None)
+            None
+        };
+        if !self.fix(column, value) {
+            return Ok(None);
         }
+        scratch.fingerprints[column] = UNKNOWN_FINGERPRINT;
+        if let Some(equation) = proof {
+            self.record(Record::ImpliedSide {
+                column: other,
+                equation,
+                side,
+            });
+        }
+        Ok(Some(column))
     }
 
     fn begin_pass(&mut self) -> (DominatedScratch, usize) {
@@ -214,6 +262,8 @@ impl Model {
         scratch.fingerprints.resize(n, UNKNOWN_FINGERPRINT);
         scratch.open.clear();
         scratch.open.resize(n, 0);
+        scratch.implying.clear();
+        scratch.saved.clear();
         let work = self
             .settings
             .dominated_columns
@@ -276,8 +326,10 @@ impl Model {
     }
 
     /// General search: candidates for `k` are the columns of its shortest row.
-    /// The fixed variable's recovered reduced cost has the sign of the
-    /// dominating column's, so no dual transformation is recorded beyond `Fixed`.
+    /// The fixed variable's recovered reduced cost is bounded by the other
+    /// column's, which has the needed sign once any multiplier on an implied
+    /// open side has moved to its row: the one dual transformation recorded
+    /// beyond `Fixed`.
     pub fn dominated_columns(&mut self) -> Result<usize, Certificate> {
         self.enter(RuleId::DominatedColumns);
         let (mut scratch, mut work) = self.begin_pass();

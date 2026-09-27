@@ -6,6 +6,7 @@
 //! typed records below but read back as generic JSON, so a snapshot written
 //! by an older or newer binary still compares field by field.
 
+use crate::allocations::Allocations;
 use presolve::Outcome;
 use presolve::result::{PresolveResult, Size as LibrarySize};
 use serde::Serialize;
@@ -77,6 +78,8 @@ pub struct Work {
     pub medium_phases: usize,
     pub parallel_comparisons: usize,
     pub equalities: Equalities,
+    /// Heap allocations made by the presolve call on its thread.
+    pub allocations: Allocations,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -97,8 +100,9 @@ pub struct Equalities {
 }
 
 impl Presolved {
-    /// Summarize a presolve call whose input had `cone_blocks` cone blocks.
-    pub fn new(result: &PresolveResult, cone_blocks: usize) -> Self {
+    /// Summarize a presolve call whose input had `cone_blocks` cone blocks
+    /// and which made `allocations`.
+    pub fn new(result: &PresolveResult, cone_blocks: usize, allocations: Allocations) -> Self {
         let stats = &result.stats;
         let (outcome, cones_after) = match &result.outcome {
             Outcome::Unchanged(problem) => ("unchanged", problem.cones.len()),
@@ -141,6 +145,7 @@ impl Presolved {
                     accepted: e.accepted,
                     estimated_work: e.estimated_work,
                 },
+                allocations,
             },
         }
     }
@@ -218,7 +223,9 @@ ENDATA
 ";
         let problem: Problem = crate::mps::parse(text).unwrap();
         let cones = problem.cones.len();
-        Presolved::new(&Presolver::default().presolve(problem), cones)
+        let (result, allocations) =
+            crate::allocations::measure(|| Presolver::default().presolve(problem));
+        Presolved::new(&result, cones, allocations)
     }
 
     #[test]
@@ -271,6 +278,13 @@ ENDATA
         );
         assert_eq!(first["time_limit_reached"], false);
         assert!(first["work"]["fast_phases"].as_u64().unwrap() >= 1);
+        // The unit tests install the counting allocator, and presolve allocates.
+        let allocations = &first["work"]["allocations"];
+        assert!(allocations["count"].as_u64().unwrap() > 0, "{allocations}");
+        assert!(
+            allocations["bytes"].as_u64().unwrap()
+                >= allocations["peak_live_bytes"].as_u64().unwrap()
+        );
         assert!(first.get("instance").is_none());
         std::fs::remove_file(&path).unwrap();
     }

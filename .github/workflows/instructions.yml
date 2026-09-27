@@ -1,0 +1,39 @@
+name: Instructions
+
+on: pull_request
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  compare:
+    name: Instructions (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: head
+          fetch-depth: 2
+      - id: base
+        run: echo "sha=$(git -C head rev-parse HEAD^1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          path: base
+          ref: ${{ steps.base.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y valgrind jq
+      - run: |
+          set +e
+          head/benchmark/compare-instructions.sh base head results
+          status=$?
+          cat results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          if [ $status -eq 3 ]; then exit 0; fi
+          exit $status

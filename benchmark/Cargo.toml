@@ -9,8 +9,16 @@ license = "Apache-2.0"
 
 [dependencies]
 presolve = { path = ".." }
+clarabel = "0.11"
 flate2 = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 rayon = "1.12"
+
+[dev-dependencies]
+gungraun = "0.20.0"
+
+[[bench]]
+name = "presolve"
+harness = false

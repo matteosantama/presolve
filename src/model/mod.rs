@@ -279,7 +279,9 @@ impl Model {
     }
     /// Append a recovery record and count it for the current rule.
     pub fn record(&mut self, record: Record) {
-        self.count(record.kind());
+        if let Some(kind) = record.kind() {
+            self.count(kind);
+        }
         self.postsolve.records.push(record);
     }
     pub fn configure(&mut self, settings: &crate::settings::Settings, deadline: Option<Instant>) {

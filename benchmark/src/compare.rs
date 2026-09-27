@@ -609,6 +609,35 @@ mod tests {
     }
 
     #[test]
+    fn allocation_counts_are_informational_work() {
+        let record = |bytes: u64| {
+            let mut record = presolved(3, json!({}), 1);
+            record["work"]["allocations"] =
+                json!({"count": 5, "bytes": bytes, "peak_live_bytes": 64});
+            record
+        };
+        let base = snapshot(&[("a/x", record(100))]);
+        let head = snapshot(&[("a/x", record(160))]);
+        let c = Comparison::new(&base, &head);
+        assert!(!c.has_changes());
+        assert_eq!(c.deltas.len(), 1);
+        assert_eq!(c.deltas[0].path, "work.allocations.bytes");
+        let md = c.render(Format::Markdown, 10);
+        assert!(
+            md.contains("\n| a | allocations.bytes | 100 | 160 | +60 | +60.00% |\n"),
+            "{md}"
+        );
+        // A base snapshot from before allocation counting is schema drift.
+        let old = snapshot(&[("a/x", presolved(3, json!({}), 1))]);
+        let c = Comparison::new(&old, &head);
+        assert!(!c.has_changes());
+        assert_eq!(
+            c.fields_only_head.keys().collect::<Vec<_>>(),
+            ["work.allocations"]
+        );
+    }
+
+    #[test]
     fn fields_on_one_side_are_schema_drift() {
         let mut head_record = presolved(3, json!({}), 1);
         head_record["work"]["new_counter"] = json!(7);

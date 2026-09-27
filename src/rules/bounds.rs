@@ -150,9 +150,14 @@ impl Model {
     /// term is recomputed; without it, such a row is skipped, which is
     /// conservative.
     pub(super) fn bound_implied(&mut self, j: usize, side: Side, recompute: bool) -> bool {
+        self.implying_row(j, side, recompute).is_some()
+    }
+
+    /// The first row that proves `bound_implied`.
+    pub(super) fn implying_row(&mut self, j: usize, side: Side, recompute: bool) -> Option<usize> {
         let b = self.bounds[j];
         if !side.value(b).is_finite() {
-            return false;
+            return None;
         }
         let mut cursor = self.a.column(j).cursor();
         while let Some((i, a)) = cursor.next(&self.a) {
@@ -174,10 +179,10 @@ impl Model {
                 Side::Upper => bound <= b.upper,
             };
             if implied {
-                return true;
+                return Some(i);
             }
         }
-        false
+        None
     }
 
     pub(super) fn implied_bound(
