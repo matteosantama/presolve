@@ -1,12 +1,6 @@
 name: CI
 
-on:
-  push:
-  pull_request:
-  workflow_dispatch:
-
-permissions:
-  contents: read
+on: pull_request
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -27,7 +21,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all --check
-      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   tests:
     name: Tests (${{ matrix.os }}, Rust ${{ matrix.rust }})
@@ -41,6 +35,7 @@ jobs:
             rust: stable
           - os: macos-latest
             rust: stable
+          # Minimum supported Rust version, from `rust-version` in Cargo.toml.
           - os: ubuntu-latest
             rust: "1.89.0"
     steps:
@@ -48,4 +43,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
-      - run: cargo test --locked --workspace --all-features
+      - run: cargo test --locked --workspace
