@@ -25,6 +25,8 @@ pub struct Delta {
     pub path: String,
     pub base: Value,
     pub head: Value,
+    /// For a size after presolve, the same field before presolve.
+    pub before: Option<Value>,
 }
 impl Delta {
     pub fn is_work(&self) -> bool {
@@ -43,14 +45,22 @@ pub struct Comparison {
     pub fields_only_head: BTreeMap<String, usize>,
     /// Instances whose record on either side reached the time limit.
     pub time_limited: Vec<String>,
+    /// Sums over every shared instance, and over each family's.
+    all: Sides,
+    families: BTreeMap<String, Sides>,
+}
+
+#[derive(Debug, Default)]
+struct Sides {
     base: Totals,
     head: Totals,
 }
 
-/// Corpus sums of one side, over the instances both sides share.
+/// Sums of one side, over the instances both sides share.
 #[derive(Debug, Default)]
 struct Totals {
     reductions: BTreeMap<String, i128>,
+    before: BTreeMap<String, i128>,
     after: BTreeMap<String, i128>,
     outcomes: BTreeMap<String, i128>,
     work: BTreeMap<String, i128>,
@@ -84,19 +94,34 @@ impl Comparison {
                 c.time_limited.push(instance.clone());
             }
             let sizes = b["after"].is_object() && h["after"].is_object();
-            c.base.add(b, sizes);
-            c.head.add(h, sizes);
+            let family = instance
+                .split_once('/')
+                .map_or(instance.as_str(), |(f, _)| f);
+            for sides in [
+                &mut c.all,
+                c.families.entry(family.to_string()).or_default(),
+            ] {
+                sides.base.add(b, sizes);
+                sides.head.add(h, sizes);
+            }
             if b.get("status") != h.get("status") {
                 c.deltas.push(Delta {
                     instance: instance.clone(),
                     path: "status".into(),
                     base: status_summary(b),
                     head: status_summary(h),
+                    before: None,
                 });
                 continue;
             }
+            let first = c.deltas.len();
             let mut path = Vec::new();
             c.diff(instance, &mut path, Some(b), Some(h), false, &empty);
+            for delta in &mut c.deltas[first..] {
+                if let Some(field) = delta.path.strip_prefix("after.") {
+                    delta.before = h["before"].get(field).cloned();
+                }
+            }
         }
         c
     }
@@ -152,6 +177,7 @@ impl Comparison {
             path: path.join("."),
             base,
             head,
+            before: None,
         });
     }
 
@@ -230,48 +256,84 @@ impl Comparison {
                 let _ = writeln!(out, "\n{title}");
             }
         };
-        let totals = |base: &BTreeMap<String, i128>, head: &BTreeMap<String, i128>, all: bool| {
-            let keys: BTreeSet<&String> = base.keys().chain(head.keys()).collect();
-            keys.into_iter()
-                .filter_map(|k| {
+        // The corpus total first, then each family; a lone family is its own total.
+        let mut groups: Vec<(&str, &Sides)> = Vec::new();
+        if self.families.len() != 1 {
+            groups.push(("all", &self.all));
+        }
+        groups.extend(self.families.iter().map(|(f, sides)| (f.as_str(), sides)));
+        // Rows of family, key, base, head, delta, and change for one kind of sum.
+        let totals = |select: fn(&Totals) -> &BTreeMap<String, i128>, all: bool| {
+            let mut rows = Vec::new();
+            for &(family, sides) in &groups {
+                let (base, head) = (select(&sides.base), select(&sides.head));
+                let keys: BTreeSet<&String> = base.keys().chain(head.keys()).collect();
+                for k in keys {
                     let (b, h) = (
                         base.get(k).copied().unwrap_or(0),
                         head.get(k).copied().unwrap_or(0),
                     );
-                    (all || b != h).then(|| {
-                        vec![
+                    if all || b != h {
+                        rows.push(vec![
+                            family.to_string(),
                             k.clone(),
                             b.to_string(),
                             h.to_string(),
                             signed(h - b),
                             percent(b, h),
-                        ]
-                    })
-                })
-                .collect::<Vec<_>>()
+                        ]);
+                    }
+                }
+            }
+            rows
         };
-        let columns = ["", "base", "head", "delta", "change"];
-        let rows = totals(&self.base.outcomes, &self.head.outcomes, false);
+        let columns = |key: &'static str| ["family", key, "base", "head", "delta", "change"];
+        let rows = totals(|t| &t.outcomes, false);
         if !rows.is_empty() {
             section(&mut out, "Outcomes");
-            out += &table(md, &with_first(&columns, "outcome"), &rows);
+            out += &table(md, &columns("outcome"), &rows);
         }
         section(
             &mut out,
-            "Size after presolve, summed over instances presolved on both sides",
+            "Size before and after presolve, summed over instances presolved on both sides",
         );
+        // Fields that are zero everywhere, such as conic sizes on a linear
+        // corpus, are left out.
+        let mut rows = Vec::new();
+        for mut row in totals(|t| &t.after, true) {
+            let sides = groups.iter().find(|(f, _)| *f == row[0]).map(|(_, s)| s);
+            let field = &row[1];
+            let (b, h) = sides.map_or((None, None), |s| {
+                (
+                    s.base.before.get(field).copied(),
+                    s.head.before.get(field).copied(),
+                )
+            });
+            let (b, h) = (b.unwrap_or(0), h.unwrap_or(0));
+            if b == 0 && h == 0 && row[2] == "0" && row[3] == "0" {
+                continue;
+            }
+            row.insert(
+                2,
+                if b == h {
+                    b.to_string()
+                } else {
+                    format!("{b} / {h}")
+                },
+            );
+            rows.push(row);
+        }
         out += &table(
             md,
-            &with_first(&columns, "field"),
-            &totals(&self.base.after, &self.head.after, true),
+            &[
+                "family", "field", "before", "base", "head", "delta", "change",
+            ],
+            &rows,
         );
-        let rows = totals(&self.base.reductions, &self.head.reductions, false);
+        let rows = totals(|t| &t.reductions, false);
         if !rows.is_empty() {
-            section(
-                &mut out,
-                "Reductions by rule and kind, summed over the corpus",
-            );
-            out += &table(md, &with_first(&columns, "rule.kind"), &rows);
+            section(&mut out, "Reductions by rule and kind");
+            out += &table(md, &columns("rule.kind"), &rows);
         }
         let instance_rows = |work: bool| {
             self.deltas
@@ -285,6 +347,7 @@ impl Comparison {
                     vec![
                         d.instance.clone(),
                         d.path.clone(),
+                        d.before.as_ref().map(compact).unwrap_or_default(),
                         compact(&d.base),
                         compact(&d.head),
                         delta,
@@ -297,25 +360,23 @@ impl Comparison {
             section(&mut out, "Changed instances");
             out += &capped(
                 md,
-                &["instance", "field", "base", "head", "delta"],
+                &["instance", "field", "before", "base", "head", "delta"],
                 rows,
                 max_rows,
             );
         }
-        let rows = totals(&self.base.work, &self.head.work, false);
+        let rows = totals(|t| &t.work, false);
         if !rows.is_empty() {
-            section(
-                &mut out,
-                "Work counters, informational, summed over the corpus",
-            );
-            out += &table(md, &with_first(&columns, "field"), &rows);
+            section(&mut out, "Work counters, informational");
+            out += &table(md, &columns("field"), &rows);
         }
         out
     }
 }
 
 impl Totals {
-    /// Count `record`, and its size after presolve when `sizes` is set.
+    /// Count `record`, and its sizes before and after presolve when `sizes`
+    /// is set.
     fn add(&mut self, record: &Value, sizes: bool) {
         let label = match (record["status"].as_str(), record["outcome"].as_str()) {
             (Some("presolved"), Some(outcome)) => outcome.to_string(),
@@ -325,6 +386,7 @@ impl Totals {
         *self.outcomes.entry(label).or_default() += 1;
         sum_leaves("", &record["reductions"], &mut self.reductions);
         if sizes {
+            sum_leaves("", &record["before"], &mut self.before);
             sum_leaves("", &record["after"], &mut self.after);
         }
         sum_leaves("", &record["work"], &mut self.work);
@@ -388,12 +450,6 @@ fn percent(base: i128, head: i128) -> String {
     } else {
         format!("{:+.2}%", (head - base) as f64 * 100.0 / base as f64)
     }
-}
-
-fn with_first<'a>(columns: &[&'a str], first: &'a str) -> Vec<&'a str> {
-    let mut columns = columns.to_vec();
-    columns[0] = first;
-    columns
 }
 
 fn capped(md: bool, headers: &[&str], mut rows: Vec<Vec<String>>, max_rows: usize) -> String {
@@ -595,8 +651,11 @@ mod tests {
         let md = c.render(Format::Markdown, 10);
         assert!(md.starts_with("**Reductions changed.**\n"), "{md}");
         assert!(md.contains("\n#### Outcomes\n"), "{md}");
-        assert!(md.contains("| reduced | 1 | 0 | -1 | -100.00% |"), "{md}");
-        assert!(md.contains("| panic | 0 | 1 | +1 | new |"), "{md}");
+        assert!(
+            md.contains("\n| a | reduced | 1 | 0 | -1 | -100.00% |\n"),
+            "{md}"
+        );
+        assert!(md.contains("\n| a | panic | 0 | 1 | +1 | new |\n"), "{md}");
     }
 
     #[test]
@@ -611,7 +670,117 @@ mod tests {
         assert_eq!(paths, ["after", "outcome"]);
         assert!(c.fields_only_base.is_empty());
         // The instance has no size on one side, so neither side sums it.
-        assert!(c.base.after.is_empty() && c.head.after.is_empty());
+        assert!(c.all.base.after.is_empty() && c.all.head.after.is_empty());
+    }
+
+    #[test]
+    fn sizes_before_presolve_are_shown_beside_sizes_after() {
+        let with_before = |after: u64, before: u64| {
+            let mut record = presolved(after, json!({}), 1);
+            record["before"] = json!({"variables": before, "a_nonzeros": 30});
+            record
+        };
+        let base = snapshot(&[("a/x", with_before(3, 10)), ("a/y", with_before(4, 5))]);
+        let head = snapshot(&[("a/x", with_before(2, 10)), ("a/y", with_before(4, 5))]);
+        let c = Comparison::new(&base, &head);
+        assert_eq!(c.deltas.len(), 1);
+        assert_eq!(c.deltas[0].path, "after.variables");
+        assert_eq!(c.deltas[0].before, Some(json!(10)));
+        let md = c.render(Format::Markdown, 10);
+        assert!(
+            md.contains("\n| family | field | before | base | head | delta | change |\n"),
+            "{md}"
+        );
+        assert!(
+            md.contains("\n| a | variables | 15 | 7 | 6 | -1 | -14.29% |\n"),
+            "{md}"
+        );
+        assert!(
+            md.contains("\n| a | a_nonzeros | 60 | 20 | 20 | 0 |  |\n"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| a/x | after.variables | 10 | 3 | 2 | -1 |"),
+            "{md}"
+        );
+        // Sides that disagree on the input size show both totals.
+        let head = snapshot(&[("a/x", with_before(2, 12)), ("a/y", with_before(4, 5))]);
+        let md = Comparison::new(&base, &head).render(Format::Markdown, 10);
+        assert!(
+            md.contains("\n| a | variables | 15 / 17 | 7 | 6 | -1 | -14.29% |\n"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| a/x | before.variables |  | 10 | 12 | +2 |"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn tables_break_out_by_family_after_the_corpus_total() {
+        let record = |after: u64, fixed: u64| {
+            let mut record = presolved(after, json!({"fixed_variables": {"fixed": fixed}}), 1);
+            record["before"] = json!({"variables": 10, "a_nonzeros": 30, "conic_rows": 0});
+            record["after"]["conic_rows"] = json!(0);
+            record
+        };
+        let base = snapshot(&[
+            ("b/y", record(4, 1)),
+            ("a/x", record(3, 2)),
+            ("a/z", record(5, 1)),
+        ]);
+        let head = snapshot(&[
+            ("b/y", record(4, 1)),
+            ("a/x", record(2, 3)),
+            ("a/z", record(5, 1)),
+        ]);
+        let md = Comparison::new(&base, &head).render(Format::Markdown, 10);
+        let rows = |md: &str, heading: &str| -> Vec<String> {
+            md.split(&format!("#### {heading}"))
+                .nth(1)
+                .unwrap()
+                .lines()
+                .skip_while(|l| !l.starts_with("| :--"))
+                .skip(1)
+                .take_while(|l| l.starts_with('|'))
+                .map(str::to_string)
+                .collect()
+        };
+        // All-zero conic rows are left out; each group lists its fields.
+        assert_eq!(
+            rows(&md, "Size before and after presolve"),
+            [
+                "| all | a_nonzeros | 90 | 30 | 30 | 0 |  |",
+                "| all | variables | 30 | 12 | 11 | -1 | -8.33% |",
+                "| a | a_nonzeros | 60 | 20 | 20 | 0 |  |",
+                "| a | variables | 20 | 8 | 7 | -1 | -12.50% |",
+                "| b | a_nonzeros | 30 | 10 | 10 | 0 |  |",
+                "| b | variables | 10 | 4 | 4 | 0 |  |",
+            ]
+        );
+        // Only changed sums appear, so family b has no reduction rows.
+        assert_eq!(
+            rows(&md, "Reductions by rule and kind"),
+            [
+                "| all | fixed_variables.fixed | 4 | 5 | +1 | +25.00% |",
+                "| a | fixed_variables.fixed | 3 | 4 | +1 | +33.33% |",
+            ]
+        );
+        // A single family is its own total, so no "all" rows repeat it.
+        let only_a = |s: &Snapshot| -> Snapshot {
+            s.iter()
+                .filter(|(k, _)| k.starts_with("a/"))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        let md = Comparison::new(&only_a(&base), &only_a(&head)).render(Format::Markdown, 10);
+        assert_eq!(
+            rows(&md, "Size before and after presolve"),
+            [
+                "| a | a_nonzeros | 60 | 20 | 20 | 0 |  |",
+                "| a | variables | 20 | 8 | 7 | -1 | -12.50% |",
+            ]
+        );
     }
 
     #[test]
