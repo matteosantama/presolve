@@ -2,6 +2,7 @@
 // Modified for this library; copyright and attribution notices are in NOTICE.
 //! Use objective derivatives and constraint locks to fix variables.
 
+use crate::result::RuleId;
 use crate::{
     model::Model,
     model::tape::{Certificate, Side},
@@ -9,6 +10,7 @@ use crate::{
 
 impl Model {
     pub fn simple_dual_fix(&mut self) -> Result<(), Certificate> {
+        self.enter(RuleId::DualFixing);
         // Newly unlocked neighbours can appear while processing this round.
         // They remain queued for the next cleanup cycle.
         for j in self.queues.unlocked_columns.take_round() {
@@ -71,6 +73,7 @@ impl Model {
     /// One scan per medium phase avoids tracking every Hessian neighbour on
     /// every bound change, which would be expensive for dense objectives.
     pub fn coupled_dual_fix(&mut self) {
+        self.enter(RuleId::DualFixing);
         // The scan reads locks, bounds, costs, and the Hessian, all of which
         // bump the revision; a repeat on an unchanged model finds nothing.
         let input = self.revision;

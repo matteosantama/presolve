@@ -1,9 +1,10 @@
 //! Exact LP folding through a verified equitable partition of the coefficient graph.
 //! Equal coefficient multisets are a conservative alternative to rounded sum
 //! signatures: they prove both block-sum identities without numerical tolerances.
+use crate::result::RuleId;
 use crate::{
     matrix::sparse::Entries,
-    model::{Model, RowDomain, tape::Rule},
+    model::{Model, RowDomain, tape::Record},
 };
 use std::{collections::HashMap, hash::Hash, time::Instant};
 
@@ -147,6 +148,7 @@ impl Model {
     /// The transpose partition identity proves that averaging any feasible
     /// point preserves feasibility and objective; no optimal point is lost.
     pub fn fold_lp(&mut self, deadline: Instant) -> usize {
+        self.enter(RuleId::LpFolding);
         if !self.cones.is_empty()
             || self.objective.p.nnz() != 0
             || self.settings.folding.max_rounds == 0
@@ -295,7 +297,7 @@ impl Model {
                 self.revision += 1;
             }
         }
-        self.postsolve.rules.push(Rule::LpFold {
+        self.record(Record::LpFold {
             columns: column_groups.into_iter().filter(|g| g.len() > 1).collect(),
             rows: row_groups.into_iter().filter(|g| g.len() > 1).collect(),
         });

@@ -8,6 +8,7 @@
 //! can slide there, so the reduction needs no optimal solution to exist. Every
 //! direction is verified exactly on the current model before it is used.
 
+use crate::result::RuleId;
 use crate::{
     model::{
         Model, RowDomain,
@@ -120,6 +121,7 @@ impl Model {
     /// genuinely constrains the dual; an implied side would only weaken a
     /// column's dual row.
     pub fn dual_propagation(&mut self) -> Result<usize, Certificate> {
+        self.enter(RuleId::DualPropagation);
         let m = self.rows.len();
         let n = self.bounds.len();
         // A problem whose live columns all carry curvature has no dual row.

@@ -3,6 +3,7 @@
 //! Substitute singleton columns and doubleton or short equalities.
 //! Shared model mutations account for Hessian fill and gradient recovery.
 
+use crate::result::RuleId;
 use crate::{
     model::{Model, RowDomain},
     problem::Bounds,
@@ -15,6 +16,7 @@ mod doubleton_chains;
 impl Model {
     /// Equality substitution with bounded stable alternatives and sparse-work scoring.
     pub fn short_equalities(&mut self, deadline: Instant) {
+        self.enter(RuleId::ShortEqualities);
         let max_fill = self.settings.substitution_fill;
         let options = self.settings.equalities;
         let relative = if options.relative_pivot > 0.0 && options.relative_pivot <= 1.0 {
@@ -188,6 +190,7 @@ impl Model {
     }
 
     pub fn singleton_columns(&mut self) {
+        self.enter(RuleId::SingletonColumns);
         let max_fill = self.settings.substitution_fill;
         // A neighbour's bound may make this column implied free without
         // changing its own degree. Inspect each affected row once per round.
@@ -275,6 +278,7 @@ impl Model {
     }
 
     pub fn doubleton_equalities(&mut self) {
+        self.enter(RuleId::DoubletonEqualities);
         let round = self.queues.doubleton_rows.take_round();
         self.batch_doubleton_chains(&round);
         self.doubleton_round(round);

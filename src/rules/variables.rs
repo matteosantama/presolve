@@ -2,6 +2,7 @@
 // Modified for this library; copyright and attribution notices are in NOTICE.
 //! Fix known variables and eliminate independent empty columns.
 
+use crate::result::RuleId;
 use crate::{model::Model, model::tape::Certificate, problem::Bounds};
 
 /// Beyond this Hessian degree the Schur complement is dense enough that the
@@ -10,6 +11,7 @@ const MAX_ELIMINATION_DEGREE: usize = 16;
 
 impl Model {
     pub fn fixed_variables(&mut self) {
+        self.enter(RuleId::FixedVariables);
         while let Some(j) = self.queues.fixed_columns.pop() {
             if self.alive[j] && self.bounds[j].equality() {
                 self.fix(j, self.bounds[j].lower);
@@ -18,6 +20,7 @@ impl Model {
     }
 
     pub fn empty_columns(&mut self) -> Result<(), Certificate> {
+        self.enter(RuleId::EmptyColumns);
         while let Some(j) = self.queues.empty_columns.pop() {
             if !self.alive[j] || !self.a.column(j).is_empty() {
                 continue;
@@ -31,7 +34,9 @@ impl Model {
                     && self.bounds[j] == Bounds::FREE
                     && self.objective.p.row(j).len() <= MAX_ELIMINATION_DEGREE
                     && self.elimination_rejected[j] != self.objective.p.revision + 1
-                    && !self.eliminate_coupled(j, self.settings.substitution_fill)
+                    && !self.with_rule(RuleId::QuadraticElimination, |m| {
+                        m.eliminate_coupled(j, m.settings.substitution_fill)
+                    })
                 {
                     self.elimination_rejected[j] = self.objective.p.revision + 1;
                 }

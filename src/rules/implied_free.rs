@@ -9,6 +9,7 @@
 //! pivots bypass maximum row/column length; explicit freedom is replaced by the
 //! same-equation implication proof, independent of `require_free_variable`.
 
+use crate::result::RuleId;
 use crate::{
     model::{Model, RowDomain, activity::Activity, queues::Worklist},
     problem::Bounds,
@@ -17,6 +18,7 @@ use std::{cell::Cell, time::Instant};
 
 impl Model {
     pub(super) fn implied_free_equalities(&mut self, deadline: Instant) -> usize {
+        self.enter(RuleId::ImpliedFreeEqualities);
         let options = self.settings.equalities;
         let relative = if options.relative_pivot > 0.0 && options.relative_pivot <= 1.0 {
             options.relative_pivot

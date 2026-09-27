@@ -3,9 +3,10 @@
 //! Detect parallel rows and columns. Support and coefficient hashes
 //! propose groups; sparse comparisons establish proportionality before edits.
 
+use crate::result::RuleId;
 use crate::{
     executor::Executor,
-    model::tape::{Certificate, Rule, Side},
+    model::tape::{Certificate, Record, Side},
     model::{Model, RowDomain},
     problem::Bounds,
 };
@@ -169,6 +170,7 @@ fn candidate_groups<K: Ord + Copy + Send>(
 
 impl Model {
     pub fn parallel_rows(&mut self, executor: &Executor) -> Result<usize, Certificate> {
+        self.enter(RuleId::ParallelRows);
         // A scan is a function of the row domains and the matrix; a repeat
         // of a fruitless scan on the same state finds nothing.
         let input = self.rows_revision;
@@ -294,7 +296,7 @@ impl Model {
             self.tighten_row(base, other, ratio, Side::Upper, intersection.upper);
         }
         self.clear_row(other);
-        self.postsolve.rules.push(Rule::MergedRow {
+        self.record(Record::MergedRow {
             keep: base,
             removed: other,
             ratio,
@@ -303,6 +305,7 @@ impl Model {
     }
 
     pub fn parallel_columns(&mut self, executor: &Executor) -> Result<usize, Certificate> {
+        self.enter(RuleId::ParallelColumns);
         let input = self.revision;
         if self.parallel_columns_seen == input {
             return Ok(0);
@@ -398,7 +401,9 @@ impl Model {
             }
         }
         if self.settings.rules.dominated_columns {
-            comparisons += self.dominated_support_groups(&entries)?;
+            comparisons += self.with_rule(RuleId::DominatedColumns, |m| {
+                m.dominated_support_groups(&entries)
+            })?;
         }
         if self.revision == input {
             self.parallel_columns_seen = input;

@@ -1,442 +1,101 @@
-use crate::results::{Case, Measurement, Metadata, RunWriter};
-use crate::{Kind, PoolMode, Preset, Result, Selection, SparsificationMode, Tuning, data};
-use presolve::{
-    Presolver,
-    problem::Problem,
-    result::Outcome,
-    settings::{Rules, Settings},
-};
-use std::hint::black_box;
-use std::path::Path;
-use std::process::Command;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+//! Presolve every instance of a corpus under a named settings profile.
 
-// Exhaustive initialization makes a new library rule require an entry here.
-macro_rules! rules {
-    ($($field:ident),+ $(,)?) => {
-        [
-            ("all", Rules { $($field: true),+ }),
-            $((stringify!($field), Rules { $field: true, ..Rules::none() })),+
-        ]
+use crate::corpus::Instance;
+use crate::mps;
+use crate::snapshot::{Presolved, Record, Run};
+use presolve::{Presolver, Settings};
+use rayon::prelude::*;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::time::{Duration, Instant};
+
+/// Named settings. Every profile runs presolve on one thread with no time
+/// limit, so its records depend only on the input and the code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum Profile {
+    Default,
+    Aggressive,
+}
+impl Profile {
+    pub fn settings(self) -> Settings {
+        let settings = match self {
+            Self::Default => Settings {
+                time_limit: Duration::MAX,
+                ..Settings::default()
+            },
+            Self::Aggressive => Settings::aggressive(Duration::MAX),
+        };
+        Settings {
+            threads: 1,
+            ..settings
+        }
+    }
+}
+
+/// One instance's record and the time its presolve call took, excluding
+/// loading. Failed instances report zero time.
+pub struct Outcome {
+    pub record: Record,
+    pub elapsed: Duration,
+}
+
+/// Run `instances` on `jobs` worker threads, zero meaning one per core.
+/// Each instance's presolve call is itself serial.
+pub fn run(instances: &[Instance], profile: Profile, jobs: usize) -> Result<Vec<Outcome>, String> {
+    let presolver = Presolver::new(profile.settings()).map_err(|e| e.to_string())?;
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(jobs)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(pool.install(|| {
+        instances
+            .par_iter()
+            .map(|instance| run_one(&presolver, instance))
+            .collect()
+    }))
+}
+
+fn run_one(presolver: &Presolver, instance: &Instance) -> Outcome {
+    let (run, elapsed) = match mps::read(&instance.path) {
+        Err(e) => (
+            Run::LoadError {
+                message: e.to_string(),
+            },
+            Duration::ZERO,
+        ),
+        Ok(problem) => {
+            let cones = problem.cones.len();
+            let start = Instant::now();
+            let result = catch_unwind(AssertUnwindSafe(|| presolver.presolve(problem)));
+            let elapsed = start.elapsed();
+            match result {
+                Ok(result) => (
+                    Run::Presolved(Box::new(Presolved::new(&result, cones))),
+                    elapsed,
+                ),
+                Err(payload) => (
+                    Run::Panic {
+                        message: panic_message(payload.as_ref()),
+                    },
+                    Duration::ZERO,
+                ),
+            }
+        }
     };
+    Outcome {
+        record: Record {
+            instance: instance.id(),
+            run,
+        },
+        elapsed,
+    }
 }
 
-const RULES: [(&str, Rules); 22] = rules!(
-    fixed_variables,
-    empty_columns,
-    quadratic_elimination,
-    empty_rows,
-    dual_fixing,
-    dual_propagation,
-    singleton_rows,
-    singleton_columns,
-    doubleton_equalities,
-    short_equalities,
-    implied_free_equalities,
-    bound_shift,
-    lp_folding,
-    equality_dependencies,
-    bound_propagation,
-    redundant_bounds,
-    parallel_rows,
-    parallel_columns,
-    dominated_columns,
-    sparsification,
-    cones,
-);
-
-pub fn settings(rule: &str, threads: usize, tuning: &Tuning) -> Result<Settings> {
-    let rules = RULES
-        .iter()
-        .find(|(name, _)| *name == rule)
-        .ok_or_else(|| {
-            format!(
-                "unknown rule '{rule}'; choose {}",
-                RULES.map(|(name, _)| name).join(", ")
-            )
-        })?
-        .1;
-    let mut settings = match tuning.preset {
-        Preset::Default | Preset::Fill => Settings::default(),
-        Preset::Aggressive | Preset::Unrestricted => {
-            Settings::aggressive(std::time::Duration::from_secs(2))
-        }
-    };
-    // "all" runs the preset's enabled families; an explicit rule isolates it.
-    if rule != "all" {
-        settings.rules = rules;
-    }
-    settings.threads = threads;
-    if matches!(tuning.preset, Preset::Fill) {
-        settings.substitution_fill = usize::MAX;
-        settings.allow_hessian_growth = true;
-    }
-    if matches!(tuning.preset, Preset::Unrestricted) {
-        settings.equalities.max_row_length = usize::MAX;
-        settings.equalities.max_column_length = usize::MAX;
-    }
-    if let Some(ms) = tuning.time_limit_ms {
-        settings.time_limit = std::time::Duration::from_millis(ms);
-    }
-    if let Some(n) = tuning.equality_row_limit {
-        settings.equalities.max_row_length = n;
-    }
-    if let Some(n) = tuning.equality_column_limit {
-        settings.equalities.max_column_length = n;
-    }
-    if let Some(relative) = tuning.equality_pivot_relative {
-        settings.equalities.relative_pivot = relative;
-    }
-    if let Some(attempts) = tuning.equality_pivot_attempts {
-        settings.equalities.max_pivot_attempts = attempts;
-    }
-    if let Some(aware) = tuning.equality_cost_aware {
-        settings.equalities.cost_aware = aware;
-    }
-    if let Some(gain) = tuning.propagation_relative_gain {
-        settings.propagation.minimum_relative_gain = gain;
-    }
-    if let Some(factor) = tuning.propagation_gain_factor {
-        settings.propagation.minimum_gain_factor = factor;
-    }
-    if let Some(mode) = tuning.sparsification {
-        settings.rules.sparsification &= !matches!(mode, SparsificationMode::Off);
-        settings.sparsification.allow_auxiliary_variables = matches!(mode, SparsificationMode::All);
-    }
-    for name in &tuning.with {
-        match name.as_str() {
-            "implied_free_equalities" => settings.rules.implied_free_equalities = true,
-            "bound_shift" => settings.rules.bound_shift = true,
-            "lp_folding" => settings.rules.lp_folding = true,
-            other => return Err(format!("cannot enable rule '{other}' with --with").into()),
-        }
-    }
-    for name in &tuning.without {
-        match name.as_str() {
-            "implied_free_equalities" => settings.rules.implied_free_equalities = false,
-            "bound_shift" => settings.rules.bound_shift = false,
-            "lp_folding" => settings.rules.lp_folding = false,
-            "dual_propagation" => settings.rules.dual_propagation = false,
-            "dominated_columns" => settings.rules.dominated_columns = false,
-            "quadratic_elimination" => settings.rules.quadratic_elimination = false,
-            "redundant_bounds" => settings.rules.redundant_bounds = false,
-            "sparsification" => settings.rules.sparsification = false,
-            "parallel_rows" => settings.rules.parallel_rows = false,
-            "parallel_columns" => settings.rules.parallel_columns = false,
-            "bound_propagation" => settings.rules.bound_propagation = false,
-            other => return Err(format!("cannot disable rule '{other}' with --without").into()),
-        }
-    }
-    Ok(settings)
-}
-
-fn bound_sides(bounds: impl IntoIterator<Item = presolve::problem::Bounds>) -> usize {
-    bounds
-        .into_iter()
-        .map(|b| usize::from(b.lower.is_finite()) + usize::from(b.upper.is_finite()))
-        .sum()
-}
-
-pub fn measure(
-    input: Problem,
-    settings: &Settings,
-    timed: bool,
-    mode: PoolMode,
-) -> Result<Measurement> {
-    let before_bound_sides = Some(bound_sides(input.variable_bounds.iter().copied()));
-    let ready = if mode == PoolMode::Reused {
-        let presolver = Presolver::new(settings.clone())?;
-        if timed {
-            drop(presolver.presolve(input.clone()));
-        }
-        Some(presolver)
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
     } else {
-        None
-    };
-    // Loading, warm-up, cloning, and destruction of both the returned model and
-    // executor stay outside timing. Cold mode includes Presolver construction.
-    let input = black_box(input);
-    let start = timed.then(Instant::now);
-    let presolver = match ready {
-        Some(presolver) => presolver,
-        None => Presolver::new(black_box(settings).clone())?,
-    };
-    let result = presolver.presolve(input);
-    let elapsed_ns = start.map(|start| start.elapsed().as_nanos().min(u64::MAX as u128) as u64);
-    let after_bound_sides = match &result.outcome {
-        Outcome::Unchanged(p) => Some(bound_sides(
-            (0..p.variable_count()).map(|j| p.variable_bounds(j)),
-        )),
-        Outcome::Reduced(r) => Some(bound_sides(
-            (0..r.problem.variable_count()).map(|j| r.problem.variable_bounds(j)),
-        )),
-        Outcome::Solved(_) => Some(0),
-        _ => None,
-    };
-    let outcome = match &result.outcome {
-        Outcome::Unchanged(_) => "unchanged",
-        Outcome::Reduced(_) => "reduced",
-        Outcome::Solved(_) => "solved",
-        Outcome::Infeasible(_) => "infeasible",
-        Outcome::Unbounded(_) => "unbounded",
-    };
-    let decisions = result.stats.equalities;
-    Ok(Measurement {
-        equality_decisions: Some(
-            [
-                ("rows_examined", decisions.rows_examined),
-                ("structural_rejections", decisions.structural_rejections),
-                ("pivot_rejections", decisions.pivot_rejections),
-                ("work_rejections", decisions.work_rejections),
-                ("attempts", decisions.attempts),
-                ("rejected_updates", decisions.rejected_updates),
-                ("numerical_rejections", decisions.numerical_rejections),
-                (
-                    "constraint_fill_rejections",
-                    decisions.constraint_fill_rejections,
-                ),
-                (
-                    "quadratic_fill_rejections",
-                    decisions.quadratic_fill_rejections,
-                ),
-                (
-                    "hessian_growth_rejections",
-                    decisions.hessian_growth_rejections,
-                ),
-                ("deadline_rejections", decisions.deadline_rejections),
-                ("accepted", decisions.accepted),
-                ("estimated_work", decisions.estimated_work),
-            ]
-            .into_iter()
-            .map(|(k, v)| (k.to_owned(), v))
-            .collect(),
-        ),
-        elapsed_ns,
-        before_bound_sides,
-        after_bound_sides,
-        outcome: outcome.into(),
-        before: result.stats.before.into(),
-        after: result.stats.after.map(Into::into),
-        time_limit_reached: result.stats.time_limit_reached,
-    })
-}
-
-fn trial(
-    executable: &Path,
-    path: &Path,
-    rule: &str,
-    threads: usize,
-    mode: PoolMode,
-    tuning: &Tuning,
-) -> Result<Measurement> {
-    let mut command = Command::new(executable);
-    command.arg("worker").arg(path).arg(rule);
-    command.arg("--threads").arg(threads.to_string());
-    command.arg("--pool-mode").arg(match mode {
-        PoolMode::Cold => "cold",
-        PoolMode::Reused => "reused",
-    });
-    command.arg("--preset").arg(tuning.preset.as_str());
-    for (flag, value) in [
-        (
-            "--propagation-relative-gain",
-            tuning.propagation_relative_gain.map(|v| v.to_string()),
-        ),
-        (
-            "--propagation-gain-factor",
-            tuning.propagation_gain_factor.map(|v| v.to_string()),
-        ),
-        (
-            "--equality-pivot-relative",
-            tuning.equality_pivot_relative.map(|v| v.to_string()),
-        ),
-        (
-            "--equality-pivot-attempts",
-            tuning.equality_pivot_attempts.map(|v| v.to_string()),
-        ),
-        (
-            "--equality-cost-aware",
-            tuning.equality_cost_aware.map(|v| v.to_string()),
-        ),
-        (
-            "--time-limit-ms",
-            tuning.time_limit_ms.map(|v| v.to_string()),
-        ),
-        (
-            "--equality-row-limit",
-            tuning.equality_row_limit.map(|v| v.to_string()),
-        ),
-        (
-            "--equality-column-limit",
-            tuning.equality_column_limit.map(|v| v.to_string()),
-        ),
-        (
-            "--sparsification",
-            tuning.sparsification.map(|v| v.as_str().to_owned()),
-        ),
-        (
-            "--with",
-            (!tuning.with.is_empty()).then(|| tuning.with.join(",")),
-        ),
-        (
-            "--without",
-            (!tuning.without.is_empty()).then(|| tuning.without.join(",")),
-        ),
-    ] {
-        if let Some(value) = value {
-            command.arg(flag).arg(value);
-        }
-    }
-    let output = command.output()?;
-    if !output.status.success() {
-        return Err(format!(
-            "worker {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
-        .into());
-    }
-    serde_json::from_slice(&output.stdout).map_err(|e| format!("invalid worker output: {e}").into())
-}
-
-// Stable fingerprint to detect changed input files, not a security checksum.
-fn fingerprint(path: &Path) -> Result<String> {
-    let hash = std::fs::read(path)?
-        .into_iter()
-        .fold(0xcbf29ce484222325u64, |hash, byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
-        });
-    Ok(format!("fnv1a64:{hash:016x}"))
-}
-
-pub fn run(root: &Path, kind: Kind, selection: Selection, trials: usize) -> Result<()> {
-    if let Some(rule) = &selection.rule {
-        settings(rule, selection.threads, &selection.tuning)?;
-    }
-    let rules: Vec<_> = RULES
-        .iter()
-        .filter(|(name, _)| selection.rule.as_deref().is_none_or(|rule| rule == *name))
-        .collect();
-    let mut problems = Vec::new();
-    for suite in data::SUITES {
-        for path in data::problems(suite)? {
-            let name = path
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .trim_end_matches(".mps.gz");
-            let id = format!("{suite}/{name}");
-            if selection
-                .problem
-                .as_deref()
-                .is_none_or(|filter| filter == name || filter == id)
-            {
-                problems.push((id, path));
-            }
-        }
-    }
-    if problems.is_empty() {
-        return Err("no matching problem; use an exact name or suite/name".into());
-    }
-    if selection.problem.is_some() && problems.len() != 1 {
-        return Err("problem name is ambiguous; specify suite/name".into());
-    }
-    let host = Command::new("hostname")
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
-        .unwrap_or_default();
-    let config = settings("all", selection.threads, &selection.tuning)?;
-    let metadata = Metadata {
-        version: 1,
-        name: selection.name,
-        kind,
-        trials,
-        created_unix_seconds: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
-        machine: format!("{}/{}/{host}", std::env::consts::OS, std::env::consts::ARCH),
-        // Execution width may differ in a valid scaling comparison. Keep it
-        // separate from the algorithm settings, which must still match.
-        settings: format!(
-            "{:?}",
-            Settings {
-                threads: 1,
-                ..config
-            }
-        ),
-        threads: selection.threads,
-        pool_mode: selection.pool_mode,
-    };
-    let mut writer = RunWriter::create(root, metadata)?;
-    let executable = std::env::current_exe()?;
-    let total = problems.len() * rules.len();
-    let mut completed = 0;
-    let mut failed = 0;
-    for (problem, path) in problems {
-        let hash = fingerprint(&path)?;
-        // Size measurements can share parsed input; only the timing path needs
-        // a fresh process and freshly prepared input for each call.
-        let input = (kind == Kind::Size).then(|| data::read(&path));
-        for &(rule, _) in &rules {
-            eprintln!(
-                "[{}/{}] {problem}/{rule} ({trials} trial{})",
-                completed + 1,
-                total,
-                if trials == 1 { "" } else { "s" }
-            );
-            let mut case = Case {
-                input_hash: hash.clone(),
-                measurements: Vec::with_capacity(trials),
-                errors: Vec::new(),
-            };
-            for at in 0..trials {
-                let result = match &input {
-                    Some(Ok(input)) => measure(
-                        input.clone(),
-                        &settings(rule, selection.threads, &selection.tuning)?,
-                        false,
-                        selection.pool_mode,
-                    ),
-                    Some(Err(e)) => Err(e.to_string().into()),
-                    None => trial(
-                        &executable,
-                        &path,
-                        rule,
-                        selection.threads,
-                        selection.pool_mode,
-                        &selection.tuning,
-                    ),
-                };
-                match result {
-                    Ok(measurement) => {
-                        if measurement.time_limit_reached {
-                            case.errors
-                                .push(format!("trial {}: presolve time limit reached", at + 1));
-                        }
-                        case.measurements.push(measurement);
-                    }
-                    Err(e) => case.errors.push(format!("trial {}: {e}", at + 1)),
-                }
-            }
-            if !case.errors.is_empty() {
-                failed += 1;
-                for error in &case.errors {
-                    eprintln!("  {error}");
-                }
-            }
-            writer.case(format!("{problem}/{rule}"), case)?;
-            completed += 1;
-        }
-    }
-    writer.finish()?;
-    println!(
-        "Saved {completed} cases to {} ({failed} failed cases).",
-        writer.path.display()
-    );
-    if failed > 0 {
-        Err("some cases failed; their errors were saved with the results".into())
-    } else {
-        Ok(())
+        "non-string panic payload".into()
     }
 }

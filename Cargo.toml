@@ -2,6 +2,10 @@
 members = ["benchmark"]
 resolver = "3"
 
+[profile.release]
+codegen-units = 1
+lto = "fat"
+
 [package]
 name = "presolve"
 version = "0.1.0"
