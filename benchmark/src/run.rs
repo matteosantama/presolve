@@ -1,5 +1,6 @@
 //! Presolve every instance of a corpus under a named settings profile.
 
+use crate::allocations;
 use crate::corpus::Instance;
 use crate::mps;
 use crate::snapshot::{Presolved, Record, Run};
@@ -65,11 +66,13 @@ fn run_one(presolver: &Presolver, instance: &Instance) -> Outcome {
         Ok(problem) => {
             let cones = problem.cones.len();
             let start = Instant::now();
-            let result = catch_unwind(AssertUnwindSafe(|| presolver.presolve(problem)));
+            let (result, allocations) = allocations::measure(|| {
+                catch_unwind(AssertUnwindSafe(|| presolver.presolve(problem)))
+            });
             let elapsed = start.elapsed();
             match result {
                 Ok(result) => (
-                    Run::Presolved(Box::new(Presolved::new(&result, cones))),
+                    Run::Presolved(Box::new(Presolved::new(&result, cones, allocations))),
                     elapsed,
                 ),
                 Err(payload) => (

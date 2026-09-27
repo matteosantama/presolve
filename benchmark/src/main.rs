@@ -6,6 +6,7 @@
 //! when statuses, outcomes, sizes, or reductions differ, 0 when only work
 //! counters or nothing differ, and 2 on error.
 
+use benchmark::allocations::Counting;
 use benchmark::compare::{self, Comparison};
 use benchmark::corpus;
 use benchmark::run::{self, Profile};
@@ -14,6 +15,9 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
 
 #[derive(Parser)]
 #[command(about = "Presolve reduction snapshots of the benchmark corpus")]

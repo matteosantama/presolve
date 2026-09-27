@@ -1,5 +1,6 @@
 //! Benchmark corpus tooling for the presolve library.
 
+pub mod allocations;
 pub mod compare;
 pub mod corpus;
 pub mod mps;
