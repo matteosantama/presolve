@@ -17,7 +17,9 @@ To compare two source trees, as CI does on every pull request:
 benchmark/compare-trees.sh ../presolve-main . benchmark/results/compare
 ```
 
-CI fails when reductions change.
+CI fails when reductions change. `benchmark/compare-instructions.sh` does the
+same for the Callgrind instruction counts of `cargo bench -p benchmark --bench
+presolve` (Linux with Valgrind); CI fails when one rises by more than 1%.
 
 Time presolve only with the workspace release profile (one codegen unit, fat
 LTO).
