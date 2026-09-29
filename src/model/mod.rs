@@ -380,7 +380,7 @@ impl Model {
 
     // Keep the recomputation loop out of the frequently inlined cache-hit path.
     #[inline(never)]
-    fn recompute_activity(&mut self, row: usize) {
+    pub(crate) fn recompute_activity(&mut self, row: usize) {
         self.activities[row] = Activity::compute(self.a.row(row), &self.bounds);
     }
 
@@ -1002,6 +1002,62 @@ impl Model {
 mod tests {
     use super::*;
     use crate::matrix::sparse::SymmetricMatrix;
+
+    #[test]
+    fn propagation_rechecks_roundoff_in_cached_row_contradictions() {
+        for sign in [1.0, -1.0] {
+            let old = [10_000_000.2, 10_000_000.4, 1.0];
+            let mut model = Model::from_parts(
+                LinkedMatrix::from_columns(1, 3, |_| std::iter::once((0, sign))),
+                Objective {
+                    p: SymmetricMatrix::zeros(3),
+                    c: vec![0.0; 3],
+                    constant: 0.0,
+                    scratch: Default::default(),
+                },
+                vec![RowDomain::Linear(if sign > 0.0 {
+                    Bounds {
+                        lower: f64::NEG_INFINITY,
+                        upper: 0.0,
+                    }
+                } else {
+                    Bounds {
+                        lower: 0.0,
+                        upper: f64::INFINITY,
+                    }
+                })],
+                old.map(|lower| Bounds {
+                    lower,
+                    upper: f64::INFINITY,
+                })
+                .to_vec(),
+            );
+            model.activity(0);
+            // Each update passes the local cancellation guard, but earlier
+            // rounding survives after every finite contribution reaches zero.
+            for j in 0..3 {
+                model.set_bounds(
+                    j,
+                    Bounds {
+                        lower: 0.0,
+                        upper: f64::INFINITY,
+                    },
+                );
+            }
+            let cached = model.activity(0);
+            assert!(if sign > 0.0 {
+                cached.min.value().unwrap() > 1.5e-9
+            } else {
+                cached.max.value().unwrap() < -1.5e-9
+            });
+            assert!(model.propagate_bounds().is_ok());
+            assert!(model.bounds.iter().all(|b| *b == Bounds::fixed(0.0)));
+
+            // A real contradiction must still be reported on either side.
+            model.set_bounds(0, Bounds::fixed(1.0));
+            assert!(model.propagate_bounds().is_err());
+        }
+    }
 
     #[test]
     fn rejected_row_staging_is_cleared_before_subsequent_substitutions() {

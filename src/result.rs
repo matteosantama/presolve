@@ -97,6 +97,8 @@ pub enum RuleId {
     ImpliedFreeEqualities,
     BoundShift,
     LpFolding,
+    NetworkEqualities,
+    ConvexDominance,
     EqualityDependencies,
     BoundPropagation,
     RedundantBounds,
@@ -107,7 +109,7 @@ pub enum RuleId {
     Cones,
 }
 impl RuleId {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 23] = [
         Self::FixedVariables,
         Self::EmptyColumns,
         Self::QuadraticElimination,
@@ -121,6 +123,8 @@ impl RuleId {
         Self::ImpliedFreeEqualities,
         Self::BoundShift,
         Self::LpFolding,
+        Self::NetworkEqualities,
+        Self::ConvexDominance,
         Self::EqualityDependencies,
         Self::BoundPropagation,
         Self::RedundantBounds,
@@ -146,6 +150,8 @@ impl RuleId {
             Self::ImpliedFreeEqualities => "implied_free_equalities",
             Self::BoundShift => "bound_shift",
             Self::LpFolding => "lp_folding",
+            Self::NetworkEqualities => "network_equalities",
+            Self::ConvexDominance => "convex_dominance",
             Self::EqualityDependencies => "equality_dependencies",
             Self::BoundPropagation => "bound_propagation",
             Self::RedundantBounds => "redundant_bounds",

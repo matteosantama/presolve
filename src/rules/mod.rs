@@ -9,12 +9,14 @@
 mod bound_shift;
 mod bounds;
 mod cones;
+mod convex_dominance;
 mod dependencies;
 pub(crate) mod dominated_columns;
 mod dual_fixing;
 pub(crate) mod dual_propagation;
 mod folding;
 mod implied_free;
+mod network;
 mod parallel;
 mod rows;
 mod sparsification;
@@ -226,6 +228,35 @@ impl Model {
                 // substitution rules and fixed columns feed cleanup. A further
                 // propagation round or bound sweep would cost more than the
                 // few extra reductions it finds here.
+                self.substitution_cleanup(deadline)?;
+            }
+            stats.time_limit = Instant::now() >= deadline;
+        }
+        // Redundant-bound removal and substitution can expose homogeneous
+        // incidence components. Search once on the final matrix, then drain
+        // the consequences of the rows actually removed.
+        if !stats.time_limit && self.settings.rules.network_equalities {
+            if self.network_equalities(deadline) > 0 {
+                self.substitution_cleanup(deadline)?;
+            }
+            stats.time_limit = Instant::now() >= deadline;
+        }
+        if !stats.time_limit && self.settings.rules.convex_dominance {
+            if self.convex_dominance(deadline) > 0 {
+                self.cleanup()?;
+            }
+            stats.time_limit = Instant::now() >= deadline;
+        }
+        // Revisit row coincidences exposed by final reductions, after the
+        // redundant-bound choices have been made. Do not rerun that bound sweep.
+        // parallel_rows itself skips an unchanged row/matrix revision.
+        if !stats.time_limit
+            && self.settings.final_parallel_scan
+            && self.settings.rules.parallel_rows
+        {
+            let before = self.revision;
+            stats.parallel_comparisons += self.parallel_rows(executor)?;
+            if self.revision != before {
                 self.substitution_cleanup(deadline)?;
             }
             stats.time_limit = Instant::now() >= deadline;

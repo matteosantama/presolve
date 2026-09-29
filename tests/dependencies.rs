@@ -370,3 +370,80 @@ fn recursive_peeling_keeps_inconsistent_core_and_lifts_its_certificate() {
         .sum();
     assert!(contradiction > 0.);
 }
+
+#[test]
+fn incidence_dependencies_preserve_weighted_lp_and_qp_warm_starts() {
+    use presolve::result::{ReductionKind, RuleId};
+    for quadratic in [false, true] {
+        for scale in [2.0_f64.powi(-20), 1.0, 2.0_f64.powi(20)] {
+            let (a, b, c) = (2. * scale, 4. * scale, 8. * scale);
+            let x = vec![4., 2., 1.];
+            let point = Solution {
+                x: x.clone(),
+                y: vec![2., 3., 5.],
+                z: vec![0.; 3],
+                conic_dual: vec![],
+                conic_slack: vec![],
+            };
+            let input = Problem {
+                p: quadratic.then(|| {
+                    CscMatrix::from_triplets(3, 3, vec![0, 1, 2], vec![0, 1, 2], vec![1.; 3])
+                        .unwrap()
+                }),
+                c: [-a, -2. * b, 3. * c]
+                    .into_iter()
+                    .zip(&x)
+                    .map(|(g, &x)| g - if quadratic { x } else { 0. })
+                    .collect(),
+                c0: 0.,
+                a: CscMatrix::from_triplets(
+                    3,
+                    3,
+                    vec![0, 1, 1, 2, 2, 0],
+                    vec![0, 0, 1, 1, 2, 2],
+                    vec![a, -a, b, -b, c, -c],
+                )
+                .unwrap(),
+                rows: vec![Constraint::Linear(Bounds::fixed(0.)); 3],
+                variable_bounds: vec![],
+                cones: vec![],
+            };
+            for enabled in [false, true] {
+                let settings = Settings {
+                    rules: Rules {
+                        network_equalities: enabled,
+                        ..Rules::none()
+                    },
+                    ..Settings::default()
+                };
+                let result = Presolver::new(settings).unwrap().presolve(input.clone());
+                assert_eq!(
+                    result.stats.after.unwrap().linear_rows,
+                    if enabled { 2 } else { 3 }
+                );
+                assert_eq!(
+                    result
+                        .stats
+                        .reductions
+                        .count(RuleId::NetworkEqualities, ReductionKind::DependentRow),
+                    usize::from(enabled)
+                );
+                if !enabled {
+                    assert!(matches!(result.outcome, Outcome::Unchanged(_)));
+                    continue;
+                }
+                let Outcome::Reduced(reduced) = result.outcome else {
+                    panic!("expected reduction")
+                };
+                assert_eq!(reduced.problem.p, input.p);
+                assert_eq!(reduced.problem.c, input.c);
+                let warm = reduced.postsolve.reduce_warm_start(point.as_ref());
+                let recovered = reduced.postsolve.recover_solution(warm.as_ref());
+                assert_eq!(recovered.x, point.x);
+                stationarity(&input, &point);
+                stationarity(&reduced.problem, &warm);
+                stationarity(&input, &recovered);
+            }
+        }
+    }
+}

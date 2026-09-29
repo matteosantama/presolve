@@ -11,7 +11,13 @@ pub struct Settings {
     pub numerics: Numerics,
     /// Maximum newly introduced A and P coefficients per substitution.
     /// Use usize::MAX for unrestricted fill; Hessian growth is a separate policy.
+    /// The default unit-doubleton exception can bypass this gross allocation cap;
+    /// disable allow_unit_doubleton_fill to enforce it for every substitution.
     pub substitution_fill: usize,
+    /// Allow certified linear unit-slope replacements beyond the gross fill cap.
+    pub allow_unit_doubleton_fill: bool,
+    /// Revisit parallel rows after final reductions without another bound sweep.
+    pub final_parallel_scan: bool,
     /// Allow substitutions to increase the total number of Hessian nonzeros.
     pub allow_hessian_growth: bool,
     pub equalities: EqualitySettings,
@@ -19,6 +25,7 @@ pub struct Settings {
     pub propagation: PropagationSettings,
     pub dual_propagation: DualPropagationSettings,
     pub dominated_columns: DominatedColumnSettings,
+    pub convex_dominance: ConvexDominanceSettings,
     pub bound_shift: BoundShiftSettings,
     pub folding: FoldingSettings,
     pub progress: Progress,
@@ -37,12 +44,15 @@ impl Default for Settings {
             rules: Rules::default(),
             numerics: Numerics::default(),
             substitution_fill: 64,
+            allow_unit_doubleton_fill: true,
+            final_parallel_scan: true,
             allow_hessian_growth: false,
             equalities: EqualitySettings::default(),
             dependencies: DependencySettings::default(),
             propagation: PropagationSettings::default(),
             dual_propagation: DualPropagationSettings::default(),
             dominated_columns: DominatedColumnSettings::default(),
+            convex_dominance: ConvexDominanceSettings::default(),
             bound_shift: BoundShiftSettings::default(),
             folding: FoldingSettings::default(),
             progress: Progress::default(),
@@ -86,6 +96,9 @@ impl Settings {
                 work_limit: WorkLimit::Unlimited,
                 ..PropagationSettings::default()
             },
+            convex_dominance: ConvexDominanceSettings {
+                minimum_reduction: 0.0,
+            },
             progress: Progress::AnyChange,
             sparsification: SparsificationSettings {
                 allow_auxiliary_variables: false,
@@ -124,15 +137,19 @@ pub struct Rules {
     /// Prefer columns with at most two entries, including in long equalities.
     /// Uses equality pivot/work limits and substitution fill/Hessian policies;
     /// row and column length caps apply only to columns with more than two entries.
-    /// Off by default.
+    /// Enabled by default.
     pub implied_free_equalities: bool,
     /// Replace an inequality by a variable bound through an invertible affine
     /// change of coordinates. Only linear pivot columns are eligible. Off by default.
     pub bound_shift: bool,
     /// Compress an LP using exactly verified equitable row/column partitions.
     /// Recovery lifts primal values and redistributes multipliers over each class.
-    /// Off by default; quadratic and conic models are excluded.
+    /// Enabled by default; quadratic and conic models are excluded.
     pub lp_folding: bool,
+    /// Remove columns above a verified one-dimensional lower convex hull.
+    pub convex_dominance: bool,
+    /// Remove exact dependencies in balanced incidence equalities.
+    pub network_equalities: bool,
     pub equality_dependencies: bool,
     pub bound_propagation: bool,
     pub redundant_bounds: bool,
@@ -164,6 +181,8 @@ impl Rules {
             implied_free_equalities: false,
             bound_shift: false,
             lp_folding: false,
+            convex_dominance: false,
+            network_equalities: false,
             equality_dependencies: false,
             bound_propagation: false,
             redundant_bounds: false,
@@ -188,9 +207,11 @@ impl Default for Rules {
             singleton_columns: true,
             doubleton_equalities: true,
             short_equalities: true,
-            implied_free_equalities: false,
+            implied_free_equalities: true,
             bound_shift: false,
-            lp_folding: false,
+            lp_folding: true,
+            convex_dominance: true,
+            network_equalities: true,
             equality_dependencies: false,
             bound_propagation: true,
             redundant_bounds: true,
@@ -347,6 +368,23 @@ pub struct DualPropagationSettings {
     /// Default: four times the constraint nonzeros, counting column visits;
     /// direction extraction shares the same allowance.
     pub work_limit: WorkLimit,
+}
+
+/// Minimum structural saving required before applying a convex-dominance batch.
+#[derive(Clone, Copy, Debug)]
+pub struct ConvexDominanceSettings {
+    /// Require a strictly larger fractional reduction in the current A + P
+    /// nonzeros. Default: 0.05 (5%). Aggressive: 0.0 (any nonempty batch).
+    /// Values are clamped to [0, 1]; NaN uses 0.05. This gate is independent
+    /// of Settings::progress and does not guarantee fewer solver iterations.
+    pub minimum_reduction: f64,
+}
+impl Default for ConvexDominanceSettings {
+    fn default() -> Self {
+        Self {
+            minimum_reduction: 0.05,
+        }
+    }
 }
 
 /// Search scope for dominated columns.

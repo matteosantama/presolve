@@ -5,9 +5,11 @@ The library simplifies a problem before it reaches a solver, then maps solutions
 and certificates back to the original variables and constraints.
 
 This README catalogs the implemented rules, their applicability, and how they
-interact. Fifteen of the eighteen rule families are enabled by default; the bounded
+interact. Core cleanup and reduction rules are enabled by default; the bounded
 equality-dependency pass, dual propagation, and dominated columns are enabled by
-the aggressive preset.
+the aggressive preset. Defaults include structural LP reductions and final row
+cleanup while retaining finite work budgets and no Hessian growth.
+Optional rules have independent switches.
 
 ## Problem model and terminology
 
@@ -59,8 +61,12 @@ from fixing a variable themselves.
 | Bounds and optimality | `dual_propagation` | Prove strict multiplier signs from the dual constraints, then make rows tight and bounds active. |
 | Substitution | `singleton_columns` | Eliminate a variable occurring in one linear row. |
 | Substitution | `doubleton_equalities` | Eliminate one variable from a two-variable equality. |
+| Substitution | `implied_free_equalities` | Prove pivot bounds implied by an equality before eliminating the variable. |
 | Substitution | `short_equalities` | Substitute from equalities under configurable candidate and fill limits. |
+| Redundancy | `convex_dominance` | Remove nonnegative linear columns dominated by convex combinations. |
+| Redundancy | `network_equalities` | Remove exact dependencies in balanced incidence equalities. |
 | Redundancy | `equality_dependencies` | Remove exact linear combinations of equalities using a bounded scratch basis. |
+| Parallel structure | `lp_folding` | Compress an LP using verified equitable partitions. |
 | Parallel structure | `parallel_rows` | Merge proportional linear constraints. |
 | Parallel structure | `parallel_columns` | Aggregate interchangeable variables or exploit objective dominance. |
 | Parallel structure | `dominated_columns` | Fix a linear column whose weight can always shift onto another column. |
@@ -124,7 +130,8 @@ at least two nonzeros, compute its activity interval from the variable bounds.
 The rule performs three related reductions:
 
 1. Detect infeasibility if the attainable activity lies beyond a row side by more
-   than the feasibility margin.
+   than the feasibility margin. Recompute an apparent cached contradiction from
+   the current row and bounds before issuing a certificate.
 2. Remove a row side already guaranteed by the activity interval. Delete the
    entire row when both sides are redundant. Redundancy requires actual
    containment, without a tolerance-based relaxation.
@@ -253,6 +260,16 @@ substitution ratio, then the shorter column. The chosen ratio magnitude must
 lie in `[1e-7, 1e7]`. For a purely linear pair, the other pivot is tried if the
 preferred substitution fails its fill or arithmetic checks.
 
+The default `allow_unit_doubleton_fill` setting permits an exception: when both columns are
+linear and `|a| = |b|`, the gross fill cap does not reject the substitution.
+Each new survivor entry replaces a deleted pivot entry, and deleting the equality
+removes two entries (at least one if its row is retained for bounds). Thus total
+constraint nonzeros strictly decrease, `P` is unchanged, and the substitution
+slope is `±1`. The same certificate applies to eligible batched chains. Arithmetic,
+cancellation, and time guards remain; this certificate does not bound affine
+offsets or guarantee a faster solve. Set the flag to `false` to enforce the gross
+fill cap for these substitutions too.
+
 **Short equalities — `short_equalities`.** By default, consider rows with 3–8
 nonzeros and a free pivot absent from `P`, appearing in 2–8 constraint rows.
 The pivot must have maximum coefficient magnitude in the equality. Prefer free
@@ -273,6 +290,38 @@ either ordering. Finite-arithmetic and cancellation checks remain in effect.
 `result.stats.equalities` reports candidate decisions and rejection reasons.
 The historical rule name is retained even for long equalities.
 
+**Convex dominance — `convex_dominance`.** Enabled by default. After the other
+phases, group linear columns with identical support and bounds `[0, +∞]`.
+A group is eligible only when its coefficients match exactly in every row
+except one. A lower convex hull in that coefficient and objective cost finds
+columns replaceable by a mixture of surviving columns, preserving every row
+activity without increasing the objective. Columns participating in quadratic
+terms or conic rows are excluded. Cost comparisons use outward-rounded
+intervals; uncertain comparisons retain the column. The rule adds no fill,
+rewrites no retained coefficients, and uses fixed-variable recovery records.
+
+Convex-dominance removals are planned before changing the model. Set
+`settings.convex_dominance.minimum_reduction` to the required fractional
+reduction in the current `A + P` nonzeros. The default is `0.05` (more than 5%);
+`Settings::aggressive` uses `0.0` (any nonempty batch). This setting is independent
+of `Settings::progress`. Values are clamped to `[0, 1]`, and NaN uses `0.05`.
+The gate is a structural work-saving heuristic, not a guarantee of fewer solver
+iterations. Expiration during planning discards the plan; an accepted batch
+completes as one soft-budget transaction.
+
+**Network equalities — `network_equalities`.** Enabled by default. After the other
+phases, find components of nonempty zero-right-hand-side equalities in which
+each participating column appears in exactly two rows with opposite coefficients.
+The homogeneous search runs first. A second search includes nonzero equality
+right-hand sides only when both positive and negative values are present, a
+necessary condition for their sum to be zero. Every addition in the component's
+RHS sum must be exact and finite, and the final sum must be zero; uncertain or
+unbalanced components remain. A qualifying component's longest row is removed;
+ties prefer the lowest row index. This introduces no matrix fill and applies to
+both LPs and QPs. Coefficients are compared exactly, not within a tolerance.
+Inequalities are outside this search. The recovery tape preserves the dependency
+for dual warm starts and postsolve. Consequence rules retain their own switches and limits.
+
 **Equality dependencies — `equality_dependencies`.** After the ordinary phases,
 construct a bounded scratch basis of equality rows. Delete a row only after
 exact arithmetic establishes that both its coefficients and right-hand side
@@ -290,6 +339,18 @@ by `Settings::aggressive`; enable it explicitly elsewhere only when the extra
 reductions justify its measured cost.
 
 ### Parallel structure
+
+**LP folding — `lp_folding`.** Before asymmetric pivot choices, refine row and
+column classes until both partitions are equitable, then construct the quotient
+and record primal/dual recovery. This default-enabled rule excludes quadratic and conic
+models. Singleton classes need no signatures or sorting. An unchanged column
+partition proves stability immediately after row refinement; from the second
+round onward, an unchanged row partition also proves stability because columns
+were already refined against it. The rule never applies an unfinished partition.
+Singleton rows incident only to singleton column classes remain untouched in the
+quotient. These shortcuts retain the configured work allowance and round cap;
+completing more folds can still trade downstream solve time between problems.
+Source: [folding.rs](src/rules/folding.rs).
 
 **Parallel rows — `parallel_rows`.** Identify linear rows with matching support
 and proportional coefficients, scale their bounds into the same coordinates,
@@ -399,23 +460,29 @@ zero-head face reduction in this implementation.
 ## Scheduling and numerical controls
 
 The [scheduler](src/rules/mod.rs) runs rules in the following order. The
-thresholds below describe the default configuration:
+thresholds below describe the default configuration. When enabled, LP folding
+runs first, after extracting singleton bounds, so later pivot choices have not
+yet broken the original symmetry:
 
 1. **Cleanup to stability:** fixed variables, cones, empty columns, simple dual
    fixing, singleton rows, empty rows, and cones again.
-2. **Fast exploration:** singleton columns, doubleton equalities, and short
-   equalities, with cleanup between groups. Repeat fast phases while each reduces
+2. **Fast exploration:** singleton columns, implied-free equalities when enabled,
+   doubleton equalities, and short equalities, with cleanup between groups. Repeat fast phases while each reduces
    `nnz(A) + nnz(G) + nnz(P)` by more than 5%.
-3. **Medium exploration:** bound propagation, coupled dual fixing, short
-   equalities, parallel rows, and parallel columns with the dominated-column
+3. **Medium exploration:** bound propagation, coupled dual fixing, implied-free
+   and short equalities, parallel rows, and parallel columns with the dominated-column
    test when enabled, interleaved with cleanup.
    Propagation permits up to three extra rounds subject to work and time limits.
    Start another fast/medium cycle only if the completed cycle reduced the same
    nonzero measure by more than 5%.
-4. **Final passes:** row sparsification and its follow-up cleanup, redundant
-   variable-bound removal, then, when enabled, one dual propagation pass whose
-   conclusions are drained by cleanup and the substitution rules, provided the
-   run has not reported a time limit.
+4. **Final passes:** enabled equality dependency checks and row sparsification,
+   redundant variable-bound removal, then enabled implied-free substitutions,
+   bound shifts, dual propagation, network equalities, and convex dominance.
+   Drain consequences when a rule changes the model. The default schedule then
+   revisits parallel rows once to catch coincidences exposed by these reductions.
+   The row revision cache skips unchanged fruitless scans; successful scans drain
+   substitution consequences without repeating the redundant-bound sweep.
+   Final passes stop when the run reports a time limit.
 
 The progress threshold and bounded searches mean presolve need not exhaust every
 possible reduction. For this measure, Hessian off-diagonal entries count twice. `Progress::AnyChange`
@@ -427,6 +494,8 @@ time budget can still prevent further reductions.
 | --- | --- | --- |
 | `time_limit` | 60 seconds | Per-call soft budget including model construction and export preparation, excluding `Presolver` initialization; an in-progress transaction can finish before the limit is observed. |
 | `substitution_fill` | `64` | Maximum new constraint and Hessian coefficients per substitution; `usize::MAX` removes the cap. |
+| `allow_unit_doubleton_fill` | `true` | Bypass the gross fill cap for linear unit-slope doubletons that strictly reduce total constraint nonzeros; disable to enforce the cap for every substitution. |
+| `final_parallel_scan` | `true` | Revisit parallel rows after final reductions; also requires `rules.parallel_rows`. |
 | `allow_hessian_growth` | `false` | Permit a net increase in Hessian nonzeros; the fill cap still applies. |
 | `equalities.relative_pivot` | `1.0` | Minimum coefficient magnitude divided by the row maximum; invalid values use 1.0. |
 | `equalities.max_pivot_attempts` | `1` | Maximum alternative transactions per row and pass; 0 disables them. |
@@ -478,6 +547,32 @@ let settings = Settings {
     ..Settings::default()
 };
 ```
+
+### Default structural reductions
+
+```rust
+use presolve::Settings;
+use std::time::Duration;
+
+let settings = Settings {
+    time_limit: Duration::from_secs(2),
+    ..Settings::default()
+};
+```
+
+Defaults enable LP folding, implied-free equality substitution, the certified
+unit-slope doubleton fill exception, and a final parallel-row scan. Implied-free
+substitution uses an equality to prove a pivot's bounds redundant before
+eliminating it, avoiding unnecessary retained bound rows. Defaults retain
+finite search budgets, numerical tolerances, progress policy, and the
+prohibition on Hessian growth. Every field remains configurable. Eligibility
+comes from matrix structure and transformation invariants, not model names.
+
+Folding avoids work once a refinement half-round proves the partition stable
+and skips reconstruction of unchanged singleton classes. The final row scan
+runs after reductions that can expose duplicates. These schedules avoid redundant
+work; they do not promise a speedup on every problem. Solver-specific integrations
+may retain their existing eligibility checks when using these defaults.
 
 ### Aggressive dimensional reduction
 

@@ -30,7 +30,7 @@ fn exact_product(a: f64, b: f64) -> Option<f64> {
         .then_some(product)
 }
 
-fn exact_difference(a: f64, b: f64) -> Option<f64> {
+pub(super) fn exact_difference(a: f64, b: f64) -> Option<f64> {
     let value = a - b;
     let bv = a - value;
     let av = value + bv;
