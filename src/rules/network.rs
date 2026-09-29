@@ -216,8 +216,13 @@ mod tests {
         m.postsolve.reduce_point(&mut p);
         m.postsolve.recover(&mut p, Recovery::Solution);
         assert_eq!(p.x, original.x);
-        for j in 0..3 {
-            let gradient = |y: &[f64]| (0..3).map(|i| a[i][j] * y[i]).sum::<f64>();
+        for (j, _) in a[0].iter().enumerate() {
+            let gradient = |y: &[f64]| {
+                a.iter()
+                    .zip(y)
+                    .map(|(row, multiplier)| row[j] * multiplier)
+                    .sum::<f64>()
+            };
             assert_eq!(gradient(&p.y), gradient(&original.y));
         }
     }
@@ -264,8 +269,13 @@ mod tests {
         m.postsolve.reduce_point(&mut restored);
         m.postsolve.recover(&mut restored, Recovery::Solution);
         assert_eq!(restored.x, original.x);
-        for j in 0..3 {
-            let gradient = |y: &[f64]| (0..3).map(|i| a[i][j] * y[i]).sum::<f64>();
+        for (j, _) in a[0].iter().enumerate() {
+            let gradient = |y: &[f64]| {
+                a.iter()
+                    .zip(y)
+                    .map(|(row, multiplier)| row[j] * multiplier)
+                    .sum::<f64>()
+            };
             assert_eq!(gradient(&restored.y), gradient(&original.y));
         }
         let dual_offset = |y: &[f64]| 3. * y[0] - 3. * y[1];

@@ -368,7 +368,7 @@ mod tests {
                 (2.0, false, false),
                 (1.0, true, false),
             ] {
-                let mut columns = vec![vec![(0, 1.0)], vec![(0, slope)], vec![]];
+                let mut columns = [vec![(0, 1.0)], vec![(0, slope)], vec![]];
                 for i in 1..=130 {
                     columns[usize::from(i > 65)].push((i, 1.0));
                     columns[2].push((i, 1.0));
