@@ -138,7 +138,7 @@ fn folding_lifts_farkas_and_recession_certificates() {
 }
 
 #[test]
-fn folding_is_opt_in_and_rejects_quadratic_and_unfinished_partitions() {
+fn folding_can_be_disabled_and_rejects_quadratic_and_unfinished_partitions() {
     let mut s = settings();
     s.rules.lp_folding = false;
     assert!(matches!(
@@ -239,4 +239,77 @@ fn folding_warm_start_mean_stays_finite_when_the_sum_overflows() {
     let warm = point(vec![1e308, 1e308, -1e308, -1e308], vec![0.], vec![0.; 4]);
     let mapped = r.postsolve.reduce_warm_start(warm.as_ref());
     assert_eq!(mapped.x, vec![0.]);
+}
+
+#[test]
+fn singleton_classes_leave_work_for_unresolved_symmetry() {
+    // The distinct bounds make two column classes singletons. After one
+    // refinement both rows are singletons too, while the last two columns
+    // still form a useful class. A small budget must pay for actual signature
+    // construction, without charging sorts of these already resolved classes.
+    let mut p = problem();
+    p.variable_bounds[0].upper = 1.0;
+    p.variable_bounds[1].upper = 2.0;
+    let mut limited = settings();
+    limited.folding.work_limit = WorkLimit::Entries(40);
+    let result = Presolver::new(limited).unwrap().presolve(p.clone());
+    let Outcome::Reduced(reduced) = result.outcome else {
+        panic!("singleton accounting exhausted the refinement budget");
+    };
+    let reference = fold(p);
+    assert_eq!(reduced.problem.a, reference.problem.a);
+    assert_eq!(reduced.problem.c, reference.problem.c);
+    assert_eq!(reduced.problem.rows, reference.problem.rows);
+    assert_eq!(reduced.problem.variable_count(), 3);
+    let point = point(vec![0.5, 1.5, 1.0], vec![2.0, 3.0], vec![4.0, 5.0, 6.0]);
+    let recovered = reduced.postsolve.recover_solution(point.as_ref());
+    assert_eq!(recovered.x, vec![0.5, 1.5, 1.0, 1.0]);
+    assert_eq!(recovered.y, vec![2.0, 3.0]);
+    assert_eq!(recovered.z, vec![4.0, 5.0, 3.0, 3.0]);
+}
+
+#[test]
+fn folding_accepts_a_fixed_point_after_one_column_refinement() {
+    // Column costs distinguish both columns before refinement. Rows split
+    // into an identical pair and a singleton, while columns cannot split.
+    // The partition is equitable after this first alternating round.
+    let p = Problem {
+        p: None,
+        c: vec![1.0, 2.0],
+        c0: 0.0,
+        a: CscMatrix::from_triplets(
+            3,
+            2,
+            vec![0, 0, 1, 1, 2, 2],
+            vec![0, 1, 0, 1, 0, 1],
+            vec![1.0, 1.0, 1.0, 1.0, 1.0, 2.0],
+        )
+        .unwrap(),
+        rows: vec![Constraint::Linear(Bounds::fixed(2.0)); 3],
+        variable_bounds: vec![],
+        cones: vec![],
+    };
+    let mut s = settings();
+    s.folding.max_rounds = 1;
+    let Outcome::Reduced(r) = Presolver::new(s).unwrap().presolve(p).outcome else {
+        panic!("an equitable partition was needlessly deferred");
+    };
+    assert_eq!(r.problem.row_count(), 2);
+    assert_eq!(r.problem.variable_count(), 2);
+    assert_eq!(
+        r.problem.a,
+        CscMatrix::from_triplets(
+            2,
+            2,
+            vec![0, 0, 1, 1],
+            vec![0, 1, 0, 1],
+            vec![1.0, 1.0, 1.0, 2.0],
+        )
+        .unwrap()
+    );
+    let reduced = point(vec![2.0, 0.0], vec![0.0, 1.0], vec![0.0; 2]);
+    let lifted = r.postsolve.recover_solution(reduced.as_ref());
+    assert_eq!(lifted.x, vec![2.0, 0.0]);
+    assert_eq!(lifted.y, vec![0.0, 0.0, 1.0]);
+    assert_eq!(lifted.z, vec![0.0; 2]);
 }

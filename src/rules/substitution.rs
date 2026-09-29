@@ -285,7 +285,6 @@ impl Model {
     }
 
     fn doubleton_round(&mut self, round: Vec<usize>) {
-        let max_fill = self.settings.substitution_fill;
         for i in round {
             if self.deadline.is_some_and(|d| Instant::now() >= d) {
                 break;
@@ -307,6 +306,15 @@ impl Model {
             let integer = |v: f64| v.is_finite() && (v - v.round()).abs() <= 1e-12 * v.abs();
             let quadratic =
                 !self.objective.p.column(j).is_empty() || !self.objective.p.column(k).is_empty();
+            // Every new survivor entry replaces a deleted pivot entry. The
+            // equality loses at least one entry even if retained for bounds.
+            // Unit slope avoids coefficient scaling; linear columns leave P unchanged.
+            let max_fill =
+                if self.settings.allow_unit_doubleton_fill && !quadratic && a.abs() == b.abs() {
+                    usize::MAX
+                } else {
+                    self.settings.substitution_fill
+                };
             let remove_j = if quadratic && a.abs() != b.abs() {
                 // LP's integral-ratio preference may repeatedly square an
                 // amplifying factor in P. Use the larger pivot for QPs.
@@ -333,6 +341,101 @@ impl Model {
             }
             if !self.substitute(i, first, self.bounds[first], max_fill) && !quadratic {
                 self.substitute(i, second, self.bounds[second], max_fill);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        matrix::{linked::LinkedMatrix, sparse::SymmetricMatrix},
+        model::{
+            objective::Objective,
+            tape::{Point, Recovery},
+        },
+    };
+
+    #[test]
+    fn unit_doubleton_exception_replaces_fill_without_changing_hessian() {
+        // Each pivot direction creates 65 entries, exceeding the default gross
+        // cap, but every one replaces an old entry in a different column.
+        for enabled in [false, true] {
+            for (slope, curved_pivot, bounded) in [
+                (1.0, false, false),
+                (-1.0, false, true),
+                (2.0, false, false),
+                (1.0, true, false),
+            ] {
+                let mut columns = vec![vec![(0, 1.0)], vec![(0, slope)], vec![]];
+                for i in 1..=130 {
+                    columns[usize::from(i > 65)].push((i, 1.0));
+                    columns[2].push((i, 1.0));
+                }
+                let mut rows = vec![RowDomain::Linear(Bounds::fixed(0.0))];
+                rows.extend(vec![
+                    RowDomain::Linear(Bounds {
+                        lower: f64::NEG_INFINITY,
+                        upper: 100.0,
+                    });
+                    130
+                ]);
+                let mut model = Model::from_parts(
+                    LinkedMatrix::from_columns(131, 3, |j| columns[j].iter().copied()),
+                    Objective {
+                        p: SymmetricMatrix::from_upper_columns(3, |j| {
+                            ((j == 2) || (curved_pivot && j < 2))
+                                .then_some((j, 1.0))
+                                .into_iter()
+                        }),
+                        c: vec![0.0, 0.0, -2.0],
+                        constant: 0.0,
+                        scratch: Default::default(),
+                    },
+                    rows,
+                    vec![
+                        if bounded {
+                            Bounds {
+                                lower: -5.0,
+                                upper: 5.0,
+                            }
+                        } else {
+                            Bounds::FREE
+                        };
+                        3
+                    ],
+                );
+                model.settings.allow_unit_doubleton_fill = enabled;
+                let original = Point {
+                    x: vec![-slope, 1.0, 2.0],
+                    y: vec![0.0; 131],
+                    z: vec![0.0; 3],
+                };
+                let before_p = model.objective.p.nnz();
+                model.doubleton_round(vec![0]);
+                let accepted = enabled && slope.abs() == 1.0 && !curved_pivot;
+                assert_eq!(
+                    model.alive.iter().filter(|&&alive| alive).count(),
+                    if accepted { 2 } else { 3 }
+                );
+                assert_eq!(
+                    model.a.nnz(),
+                    if accepted {
+                        260 + usize::from(bounded)
+                    } else {
+                        262
+                    }
+                );
+                assert_eq!(model.objective.p.nnz(), before_p);
+                if accepted {
+                    let mut point = original.clone();
+                    model.postsolve.reduce_point(&mut point);
+                    model.postsolve.recover(&mut point, Recovery::Solution);
+                    assert_eq!(point.x, original.x);
+                    assert_eq!(point.y, original.y);
+                    assert_eq!(point.z, original.z);
+                }
             }
         }
     }

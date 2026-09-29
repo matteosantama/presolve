@@ -115,15 +115,21 @@ impl Model {
             } else {
                 self.a.column(i).len()
             };
-            let cost = length
-                .saturating_mul(length.max(1).ilog2() as usize + 1)
-                .saturating_add(1);
+            // A singleton cannot split or merge and constructs no signature.
+            // Charge its constant bookkeeping, not a sort that is skipped.
+            let cost = if counts[color] == 1 {
+                1
+            } else {
+                length
+                    .saturating_mul(length.max(1).ilog2() as usize + 1)
+                    .saturating_add(1)
+            };
             if !spend(work, cost) {
                 return None;
             }
             if counts[color] == 1 {
                 // Refinement includes the previous color, so a singleton
-                // cannot split or merge. Preserve numbering and work charges.
+                // cannot split or merge. Preserve deterministic numbering.
                 result[i] = next_color;
                 next_color += 1;
                 continue;
@@ -195,7 +201,7 @@ impl Model {
         let active_rows = rows.iter().filter(|&&c| c != usize::MAX).count();
         let active_columns = columns.iter().filter(|&&c| c != usize::MAX).count();
         let mut stable = false;
-        for _ in 0..self.settings.folding.max_rounds {
+        for round in 0..self.settings.folding.max_rounds {
             // Refinement only splits classes. If every class is a singleton,
             // no compression is possible, even without reaching a fixed point.
             if row_classes == active_rows && column_classes == active_columns {
@@ -205,10 +211,19 @@ impl Model {
             else {
                 return 0;
             };
+            // From the second round onward, columns are already equitable
+            // for the old row partition. If rows do not split, neither side
+            // can refine further; another column pass would be identical.
+            if round > 0 && r == rows {
+                stable = true;
+                break;
+            }
             let Some((c, nc)) = self.fold_refine::<false>(&columns, &r, &mut work, deadline) else {
                 return 0;
             };
-            stable = r == rows && c == columns;
+            // Rows were just refined against the old columns. If columns
+            // do not split, the new row/column pair is already equitable.
+            stable = c == columns;
             rows = r;
             columns = c;
             row_classes = nr;
@@ -248,14 +263,23 @@ impl Model {
                 return 0;
             }
             let i = group[0];
-            if !spend(
-                &mut work,
-                self.a
+            let length = self.a.row(i).len();
+            if !spend(&mut work, length.saturating_add(group.len())) {
+                return 0;
+            }
+            // A singleton row incident only to singleton column classes is
+            // the identity part of the quotient. No coefficient or domain
+            // changes, so rebuilding it and invalidating its queues is wasted.
+            if group.len() == 1
+                && self
+                    .a
                     .row(i)
-                    .len()
-                    .saturating_mul(2)
-                    .saturating_add(group.len()),
-            ) {
+                    .iter()
+                    .all(|(j, _)| column_groups[columns[j]].len() == 1)
+            {
+                continue;
+            }
+            if !spend(&mut work, length) {
                 return 0;
             }
             let mut entries: Vec<_> = self.a.row(i).iter().map(|(j, a)| (columns[j], a)).collect();

@@ -26,7 +26,7 @@ impl Model {
             if self.a.row(i).len() <= 1 {
                 continue;
             }
-            let activity = self.activity(i);
+            let mut activity = self.activity(i);
             let mut bounds = original_bounds;
             if bounds.upper.is_finite()
                 && activity
@@ -34,7 +34,18 @@ impl Model {
                     .value()
                     .is_some_and(|v| self.separated(v, bounds.upper))
             {
-                return Err(self.row_certificate(i, -1.0));
+                // Incremental updates can retain roundoff from terms that
+                // have since disappeared. Confirm a contradiction directly
+                // before turning that cached estimate into a certificate.
+                self.recompute_activity(i);
+                activity = self.activity(i);
+                if activity
+                    .min
+                    .value()
+                    .is_some_and(|v| self.separated(v, bounds.upper))
+                {
+                    return Err(self.row_certificate(i, -1.0));
+                }
             }
             if bounds.lower.is_finite()
                 && activity
@@ -42,7 +53,15 @@ impl Model {
                     .value()
                     .is_some_and(|v| self.separated(bounds.lower, v))
             {
-                return Err(self.row_certificate(i, 1.0));
+                self.recompute_activity(i);
+                activity = self.activity(i);
+                if activity
+                    .max
+                    .value()
+                    .is_some_and(|v| self.separated(bounds.lower, v))
+                {
+                    return Err(self.row_certificate(i, 1.0));
+                }
             }
             // Redundancy requires actual containment; a small interval may
             // carry a large quadratic objective cost.

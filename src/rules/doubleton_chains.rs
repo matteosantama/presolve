@@ -258,7 +258,9 @@ impl Model {
                 fill += usize::from(old_root == 0.0);
                 // A conservative aggregate cap never grants more fill than a
                 // single allowed pivot. Rejected batches fall back unchanged.
-                if fill > self.settings.substitution_fill {
+                if !self.settings.allow_unit_doubleton_fill
+                    && fill > self.settings.substitution_fill
+                {
                     return false;
                 }
                 let at = entries.partition_point(|&(j, _)| j < root);
@@ -395,6 +397,28 @@ mod tests {
     }
 
     #[test]
+    fn unit_chain_exception_accepts_replacement_entries_over_gross_cap() {
+        for enabled in [false, true] {
+            let (mut model, _) = fixture(1.0);
+            let entries: Entries = model.a.row(16).iter().filter(|&(j, _)| j != 0).collect();
+            model.replace_rows_batch(vec![(16, entries, model.rows[16])]);
+            model.settings.substitution_fill = 0;
+            model.settings.allow_unit_doubleton_fill = enabled;
+            let before = model.a.nnz();
+            model.batch_doubleton_chains(&(0..16).collect::<Vec<_>>());
+            if enabled {
+                assert!(
+                    matches!(model.postsolve.records.as_slice(), [Record::DoubletonChain { steps }] if steps.len() == 16)
+                );
+                assert!(model.a.nnz() < before);
+            } else {
+                assert!(model.postsolve.records.is_empty());
+                assert_eq!(model.a.nnz(), before);
+            }
+        }
+    }
+
+    #[test]
     fn batch_rewrites_rows_once_and_preserves_objective_primal_dual_and_warm_start() {
         for (sign, branched) in [(-1.0, false), (1.0, false), (-1.0, true), (1.0, true)] {
             let (mut model, original) = fixture_tree(sign, branched);
@@ -499,7 +523,10 @@ mod tests {
                         upper: 100.0,
                     }
                 }
-                1 => model.settings.substitution_fill = 0,
+                1 => {
+                    model.settings.substitution_fill = 0;
+                    model.settings.allow_unit_doubleton_fill = false;
+                }
                 2 => model.rows[3] = RowDomain::Linear(Bounds::fixed(f64::MAX)),
                 3 => model.deadline = Some(Instant::now()),
                 4 => {

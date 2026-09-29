@@ -88,8 +88,8 @@ fn long_degree_two_pivot_removes_row_and_recovers_primal_and_dual() {
 }
 
 #[test]
-fn optional_rule_is_off_by_default() {
-    assert!(!Rules::default().implied_free_equalities);
+fn default_rule_can_be_disabled() {
+    assert!(Rules::default().implied_free_equalities);
     let mut s = settings();
     s.rules.implied_free_equalities = false;
     assert!(matches!(
