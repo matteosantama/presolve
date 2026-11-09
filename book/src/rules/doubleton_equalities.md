@@ -6,17 +6,17 @@ Unlike singleton-column elimination, the eliminated variable can appear in sever
 
 ## Example
 
-Suppose the problem contains `2x + 3y = 12`, another row `x + z <= 8`, and the objective `4x + y + z`.
+Suppose the problem contains \\(2x + 3y = 12\\), another row \\(x + z \le  8\\), and the objective \\(4x + y + z\\).
 
-Solving the equality for `x` gives
+Solving the equality for \\(x\\) gives
 
 \\[
 x=6-\tfrac32 y.
 \\]
 
-Substitution changes the other row to `-1.5y + z <= 2` and the objective to `24 - 5y + z`.
+Substitution changes the other row to \\(-\tfrac32y + z \le  2\\) and the objective to \\(24 - 5y + z\\).
 
-If `x` is unbounded, the defining equality can be removed. If `0 <= x <= 6`, those bounds instead become `0 <= y <= 4`. The implementation initially retains a singleton row representing these restrictions; singleton-row elimination can convert it into variable bounds.
+If \\(x\\) is unbounded, the defining equality can be removed. If \\(0 \le  x \le  6\\), those bounds instead become \\(0 \le  y \le  4\\). These restrictions can be retained as a singleton row; singleton-row elimination can convert it into variable bounds.
 
 ## Mathematical formulation
 
@@ -54,7 +54,7 @@ Bounds \\(L_j\le x_j\le U_j\\) become
 L_j\le\delta+s x_k\le U_j.
 \\]
 
-For a positive pivot \\(a\\), the implementation represents this as the singleton row
+For a positive pivot \\(a\\), these bounds are equivalent to the singleton row
 
 \\[
 d-aU_j\le b x_k\le d-aL_j.
@@ -66,7 +66,7 @@ For a negative pivot, the lower and upper variable bounds exchange roles. These 
 
 Let \\(z\\) contain all variables except \\(x_j\\). Write the reconstruction as \\(x=Tz+h\\), where the surviving coordinates are copied unchanged and coordinate \\(j\\) is \\(\delta+s x_k\\). Here \\(h_j=\delta\\) and the other entries of \\(h\\) are zero.
 
-For a symmetric quadratic objective \\(f(x)=\tfrac12 x^TPx+c^Tx+c_0\\), substitution gives
+For the [shared quadratic objective](../problem_formulation.md), substitution gives
 
 \\[
 P_{\mathrm{red}}=T^TPT,
@@ -78,45 +78,16 @@ Cross terms can therefore change the survivor's quadratic coefficients as well a
 
 In exact arithmetic, substitution with all necessary variable bounds retained gives a one-to-one correspondence between feasible points of the reduced and original problems, with equal objective values. Optimal solutions are preserved.
 
-## Implementation overview
+## Applicability
 
-`Model::doubleton_equalities` in `src/rules/substitution.rs` takes a round from the doubleton-row queue. It first attempts the batch path described below, then processes the remaining candidates through `doubleton_round`.
+Elimination requires a usable pivot and finite transformed data. The selected coefficient ratio must have magnitude between \\(10^{-7}\\) and \\(10^7\\). For quadratic variables with unequal coefficient magnitudes, the larger pivot is preferred to limit amplification. Otherwise singleton columns, approximately integral ratios, and shorter columns guide the choice.
 
-The individual path checks the deadline, confirms a linear equality, and rechecks that exactly two coefficients remain. It chooses the elimination direction as follows:
+Necessary bounds on the eliminated variable survive as a singleton constraint. When enabled, singleton-row elimination converts it into bounds on the survivor. Unbounded variables need no retained bound row.
 
-1. If either variable participates in the quadratic objective and coefficient magnitudes differ, prefer the larger pivot magnitude to limit amplification.
-2. Otherwise, prefer a singleton constraint column when only one of the two columns is singleton.
-3. Prefer a direction whose coefficient ratio is approximately integral when only one direction has that property.
-4. Otherwise, prefer the shorter constraint column; ties select the second entry in the row's iteration order.
+Suitable trees of linear equalities can be reduced together when coefficients have equal magnitudes and all eliminated variables are free. This changes how much work is needed, not the underlying substitution argument. Numerical checks and limits on added coefficients can reject individual or grouped reductions.
 
-The approximately integral test uses a relative tolerance of `1e-12`. It is a coefficient heuristic, not an integer-variable restriction.
+## Recovery
 
-The selected coefficient ratio must be finite with magnitude between `1e-7` and `1e7`, inclusive. If it fails this check, the row is skipped. If the preferred substitution is attempted but fails, the opposite pivot is tried only when neither variable participates in the quadratic objective.
+Postsolve uses the saved defining equality to reconstruct the eliminated variable after recovering the surviving variables. It also maps row and signed variable-bound multipliers back to the original problem. With necessary bounds retained, the recovered point has the same objective value in exact arithmetic.
 
-## Substitution checks and bound handling
-
-`Model::substitute` and `substitute_equation` in `src/model/mod.rs` perform the shared substitution. The individual doubleton rule passes the eliminated variable's full current bounds, rather than first discarding implied sides as the singleton-column rule can do.
-
-The helper checks finite offsets, slopes, and transformed finite row bounds. It prepares changes to the other rows and checks the objective update before committing the reduction. New coefficients are limited by `substitution_fill`, and Hessian growth has a separate policy.
-
-When `allow_unit_doubleton_fill` is enabled, neither variable participates in the quadratic objective, and the two row coefficients have equal magnitudes, the rule lifts the ordinary gross fill cap. The substitution slope then has magnitude one, the Hessian is unchanged, and each new survivor entry replaces a removed pivot entry. Other numerical checks still apply.
-
-If bounds must survive, the defining row becomes a singleton constraint. When enabled, [singleton-row elimination](./singleton_rows.md) converts it into bounds on the survivor. Otherwise the singleton constraint remains to enforce those bounds.
-
-## Batch elimination of equality trees
-
-`batch_doubleton_chains` in `src/rules/doubleton_chains.rs` handles suitable groups before individual substitution. It is restricted to linear objectives without cone blocks and sufficiently large candidate frontiers, with no pending singleton rows.
-
-Eligible edges have equal coefficient magnitudes and a finite right-hand side. A connected component must be a tree with at least eight edges and at most one bounded variable. The bounded variable, if present, is retained as the representative; otherwise the representative is chosen by largest constraint-column length, breaking ties by variable index.
-
-The batch expresses the other variables as affine functions of the representative, rebuilds affected rows, and updates the objective. Eliminated variables are free. Cycles and other ineligible components remain for individual processing, which can expose singleton or empty rows through substitution.
-
-Finite-arithmetic, cancellation, fill, and deadline checks can reject a batch before committing changes. A rejected component remains available to the ordinary doubleton path.
-
-## Postsolve recovery
-
-Individual substitution saves a `Record::Substituted` containing the defining equation, objective derivative information, other row incidences, and whether a bound row was retained.
-
-During ordinary primal recovery, postsolve restores the eliminated variable from the saved equality after recovering the survivor. Dual recovery uses the saved objective derivative and row coefficients to reconstruct row and signed variable-bound multipliers under the convention \\(Px+c=A^Ty+z\\).
-
-The batch path instead saves a `Record::DoubletonChain` with the original equations and incidences. Reverse recovery restores eliminated variables and multipliers in the order needed by their dependencies. Both paths retain information for certificate recovery as well as ordinary solutions.
+See [Settings](../settings.md) for rule switches and tuning, and [Rule scheduling](../scheduling.md) for ordering and stopping conditions.

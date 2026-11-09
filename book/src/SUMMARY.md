@@ -2,6 +2,8 @@
 
 - [Introduction](./introduction.md)
 - [Problem Formulation](./problem_formulation.md)
+- [Settings](./settings.md)
+- [Rule Scheduling](./scheduling.md)
 
 # Presolve Rules
 

@@ -6,21 +6,15 @@ This rule removes constraints, not variables. It does not change the objective o
 
 ## Examples
 
-The row `-2 <= 0 <= 7` is satisfied for every variable vector and can be removed.
+The row \\(-2 \le  0 \le  7\\) is satisfied for every variable vector and can be removed.
 
-The row `2 <= 0 <= 7` is impossible because its lower bound exceeds zero. Likewise, `-7 <= 0 <= -2` is impossible because its upper bound is below zero. Either row proves that the entire problem is infeasible.
+The row \\(2 \le  0 \le  7\\) is impossible because its lower bound exceeds zero. Likewise, \\(-7 \le  0 \le  -2\\) is impossible because its upper bound is below zero. Either row proves that the entire problem is infeasible.
 
-For an empty equality, `0 = 0` is redundant, while `0 = 3` proves infeasibility in exact arithmetic.
+For an empty equality, \\(0 = 0\\) is redundant, while \\(0 = 3\\) proves infeasibility in exact arithmetic.
 
 ## Mathematical formulation
 
-Consider two-sided linear constraints
-
-\\[
-\ell \le Ax \le u.
-\\]
-
-If row \\(i\\) has no nonzero coefficients, then \\(A_{i:}=0\\) and its constraint reduces to
+Use the [shared problem notation](../problem_formulation.md). If row \\(i\\) has no nonzero coefficients, then \\(A_{i:}=0\\) and its constraint reduces to
 
 \\[
 \ell_i \le 0 \le u_i.
@@ -38,46 +32,16 @@ Let \\(R\\) contain all row indices except \\(i\\). Removing a satisfied empty r
 
 All variables, variable bounds, and objective data remain unchanged. In exact arithmetic, the original and reduced problems have the same feasible variable vectors and objective values, and therefore the same optimal solutions.
 
-An empty row can be present initially or arise during another reduction. For example, fixing `x = 3` in `2x <= 6` leaves `0 <= 0`, which this rule can remove. Fixing `x = 3` in `2x >= 7` instead leaves `0 >= 1`, exposing infeasibility.
-
-## Implementation overview
-
-`Model::empty_rows` in `src/rules/rows.rs` drains the empty-row queue. For each candidate it checks that the row has a linear domain and that its sparse coefficient list is still empty. Other row domains and stale candidates that are no longer empty are skipped.
-
-The rule checks both sides against zero:
-
-```rust
-if self.separated(b.lower, 0.0) {
-    return Err(self.row_certificate(i, 1.0));
-}
-if self.separated(0.0, b.upper) {
-    return Err(self.row_certificate(i, -1.0));
-}
-self.delete_row(i);
-```
-
-The lower-side check returns an infeasibility certificate with row multiplier `+1`; the upper-side check uses `-1`. Because the row has no coefficients, this row alone supplies the contradiction without requiring variable-bound multipliers at this stage of presolve. Recovery maps the certificate back through earlier reductions.
-
-If neither check detects a violation beyond tolerance, `delete_row` retires the row and saves a `Record::DeletedRow` for postsolve.
-
-`Queues::row_changed` in `src/model/queues.rs` queues rows whose coefficient count reaches zero. The cleanup loop in `src/rules/mod.rs` runs empty-row elimination when enabled and repeats while the model changes, allowing reductions such as fixed-variable elimination to expose new empty rows.
+An empty row can be present initially or arise during another reduction. For example, fixing \\(x = 3\\) in \\(2x \le  6\\) leaves \\(0 \le  0\\), which this rule can remove. Fixing \\(x = 3\\) in \\(2x \ge  7\\) instead leaves \\(0 \ge  1\\), exposing infeasibility.
 
 ## Numerical tolerance
 
-The implementation does not use an exact comparison to decide infeasibility. `Model::separated` in `src/rules/bounds.rs` tests
+Infeasibility is tested with the feasibility margin described in [Settings](../settings.md#numerical-tolerances). A small violation within tolerance can be treated as satisfied. For example, \\(0 \le  -7e-18\\) can be removed when the configured tolerance covers that residual.
 
-\\[
-L > U + \varepsilon\bigl(1+\max(|L|,|U|)\bigr),
-\\]
+This differs from exact feasible-set equivalence: a recovered point can retain that small violation in the original problem.
 
-where \\(\varepsilon\\) is the configured feasibility tolerance. Empty-row elimination applies this test to \\((\ell_i,0)\\) and \\((0,u_i)\\).
+## Recovery
 
-A small violation within tolerance is therefore treated as satisfied and the row is removed. For example, `0 <= -7e-18` can be removed when the configured tolerance covers that residual. Retaining such roundoff can allow the downstream solver to magnify it into a misleading infeasibility certificate.
+No primal variable needs reconstruction. The removed row's multiplier is restored as zero; it contributes no coefficients to stationarity and zero satisfies complementarity for a satisfied row.
 
-This tolerance-based behavior differs from exact feasible-set equivalence: a removed row can retain a tiny violation in the original problem. Recovery still exposes that original residual rather than making the original constraint exact.
-
-## Postsolve recovery
-
-No primal variable needs reconstruction for empty-row elimination alone. During dual recovery, `Record::DeletedRow` restores the removed row's multiplier as zero.
-
-This is valid for a satisfied empty row because it contributes no variable coefficients to stationarity, and a zero multiplier satisfies complementarity. For a row removed within numerical tolerance, the recovered point can still have the small original primal residual described above.
+See [Settings](../settings.md) for rule switches and tuning, and [Rule scheduling](../scheduling.md) for ordering and stopping conditions.

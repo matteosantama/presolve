@@ -4,3 +4,4 @@ authors = ["Jimmy-Sim"]
 language = "en"
 [output.html]
 mathjax-support = true
+additional-js = ["theme/print-refresh.js"]

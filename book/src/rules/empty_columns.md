@@ -6,25 +6,17 @@ An empty constraint column does not necessarily mean an independent variable: qu
 
 ## Linear examples
 
-Suppose `x` appears in no constraints and has bounds `1 <= x <= 5`.
+Suppose \\(x\\) appears in no constraints and has bounds \\(1 \le  x \le  5\\).
 
-- With objective `3x + 2y`, the best choice is `x = 1`. Removing `x` leaves the objective `3 + 2y`.
-- With objective `-3x + 2y`, the best choice is `x = 5`, leaving `-15 + 2y`.
-- With no objective term involving `x`, any value in its interval works. The implementation chooses zero clipped to the interval, giving `x = 1` here.
+- With objective \\(3x + 2y\\), the best choice is \\(x = 1\\). Removing \\(x\\) leaves the objective \\(3 + 2y\\).
+- With objective \\(-3x + 2y\\), the best choice is \\(x = 5\\), leaving \\(-15 + 2y\\).
+- With no objective term involving \\(x\\), any value in its interval works. The implementation chooses zero clipped to the interval, giving \\(x = 1\\) here.
 
-If the objective coefficient is negative and there is no upper bound, increasing `x` decreases the objective without limit. This establishes an improving direction; the full problem is unbounded below if the remaining constraints are feasible.
+If the objective coefficient is negative and there is no upper bound, increasing \\(x\\) decreases the objective without limit. This establishes an improving direction; the full problem is unbounded below if the remaining constraints are feasible.
 
 ## Mathematical formulation
 
-Consider
-
-\\[
-\min_x \; \tfrac12 x^T P x+c^T x+c_0,
-\qquad \ell\le Ax\le u,
-\qquad L\le x\le U,
-\\]
-
-where \\(P\\) is symmetric. Suppose column \\(k\\) is empty, so \\(A_{:k}=0\\). First assume there are no quadratic cross terms involving \\(x_k\\): \\(P_{jk}=0\\) for every \\(j\ne k\\).
+Using the [shared problem notation](../problem_formulation.md), suppose column \\(k\\) is empty, so \\(A_{:k}=0\\). First assume there are no quadratic cross terms involving \\(x_k\\): \\(P_{jk}=0\\) for every \\(j\ne k\\).
 
 Let \\(R\\) denote the remaining variable indices and \\(p=P_{kk}\\). The variable's independent objective contribution is
 
@@ -63,7 +55,7 @@ Every feasible reduced point can be extended with \\(x_k=v\\), and any original 
 
 ### Quadratic example
 
-For the independent objective contribution `x^2 - 6x` and bounds `0 <= x <= 2`, the quadratic convention gives `p = 2` and `c = -6`. The unconstrained minimizer is `3`, so the chosen value is `2`. Substitution contributes `-8` to the objective constant.
+For the independent objective contribution \\(x^2 - 6x\\) and bounds \\(0 \le  x \le  2\\), the quadratic convention gives \\(p = 2\\) and \\(c = -6\\). The unconstrained minimizer is \\(3\\), so the chosen value is \\(2\\). Substitution contributes \\(-8\\) to the objective constant.
 
 ### Improving recession direction
 
@@ -76,32 +68,18 @@ d_k=-\operatorname{sign}(c_k),
 
 Because the constraint column is empty, \\(Ad=0\\). There are no quadratic terms involving the variable, and \\(c^Td=-|c_k|<0\\). The absent bound permits movement indefinitely in this direction. This direction does not itself establish that the remaining constraints are feasible.
 
-## Implementation overview
-
-`Model::empty_columns` in `src/rules/variables.rs` drains the empty-column queue. It skips variables that are no longer active or whose constraint columns are no longer empty.
-
-`Objective::diagonal` in `src/model/objective.rs` returns the diagonal coefficient only if the variable has no quadratic cross terms. A missing quadratic term gives a diagonal value of zero.
-
-For an independent variable, the rule skips negative curvature and selects the value using the cases above. If the result is finite, it calls `Model::fix`. This chooses an optimal value before using the shared substitution machinery; unlike fixed-variable elimination, the variable need not already have equal bounds.
-
-If the selected value is nonfinite and the contribution is linear with a nonzero coefficient, the rule returns a recession certificate through `recession_certificate` and `dual_certificate`. Recovery maps the direction back through earlier reductions.
-
 ## Coupled quadratic variables
 
-When quadratic cross terms exist, the rule does not choose a constant value. It can delegate to `Model::eliminate_coupled` under the separate `QuadraticElimination` rule when quadratic elimination is enabled, the variable has no lower or upper bound, and its Hessian row has at most 16 stored entries.
-
-That helper requires a finite, positive diagonal coefficient and uses the affine minimizer
+An unbounded variable with an empty constraint column but quadratic cross terms may instead be removed using its stationarity condition, provided \\(P_{kk}>0\\):
 
 \\[
 x_k=-\frac{c_k+\sum_{j\ne k}P_{kj}x_j}{P_{kk}}.
 \\]
 
-It substitutes this expression into the objective, subject to finite-arithmetic and fill checks, and prohibits net Hessian growth. A rejected attempt is not retried at the same Hessian revision. Bounded coupled variables are skipped here because their minimizing expression can require clipping and need not be affine.
+This is an affine substitution, not a constant fixing. It requires finite transformed data and respects fill limits without permitting net Hessian growth. Bounded coupled variables are retained by this rule because their minimizing expression can require clipping. See [Settings](../settings.md) for enabling quadratic elimination.
 
-## Numerical checks and postsolve recovery
+## Recovery
 
-The independent branch calls `fix` only for a finite chosen value. The shared objective substitution checks the resulting constant and coefficients before applying changes. If substitution fails, the variable is not removed. A nonfinite computed value in the positive-curvature case does not trigger the linear recession certificate.
+For a constant fixing, postsolve restores the chosen value and its signed bound multiplier \\(pv+c_k\\), since the eliminated column had no constraint entries. For a coupled quadratic elimination it restores the variable using the affine expression above, after recovering the variables on which it depends. Numerical rejection of an elimination does not establish infeasibility.
 
-Successful constant substitution saves a `Record::Fixed`. During ordinary recovery, postsolve restores the chosen value. Since this column had no constraint entries, its signed bound multiplier is recovered from the saved objective derivative, \\(p v+c_k\\), using the stationarity convention \\(Px+c=A^Ty+z\\).
-
-The coupled path instead saves a `Record::Eliminated` containing the offset and slopes. Postsolve reconstructs the variable from that affine expression after recovering the variables on which it depends.
+See [Settings](../settings.md) for rule switches and tuning, and [Rule scheduling](../scheduling.md) for ordering and stopping conditions.

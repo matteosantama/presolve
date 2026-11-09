@@ -6,22 +6,17 @@ Unlike singleton-row elimination, this rule works on rows containing several var
 
 ## Example
 
-Suppose a row is `x + y <= 10`, with `y >= 3` and `0 <= x <= 20`.
+Suppose a row is \\(x + y \le  10\\), with \\(y \ge  3\\) and \\(0 \le  x \le  20\\).
 
-Even at its smallest allowed value, `y` contributes at least `3`, so `x` cannot exceed `7`. The updated bound is `0 <= x <= 7`.
+Even at its smallest allowed value, \\(y\\) contributes at least \\(3\\), so \\(x\\) cannot exceed \\(7\\). The updated bound is \\(0 \le  x \le  7\\).
 
-Negative coefficients reverse the direction. For `-2x + y <= 10` and `y >= 4`, the row implies `-2x <= 6`, hence `x >= -3`.
+Negative coefficients reverse the direction. For \\(-2x + y \le  10\\) and \\(y \ge  4\\), the row implies \\(-2x \le  6\\), hence \\(x \ge  -3\\).
 
-The original row generally remains necessary: knowing `x <= 7` alone does not enforce `x + y <= 10` when `y` can exceed `3`.
+The original row generally remains necessary: knowing \\(x \le  7\\) alone does not enforce \\(x + y \le  10\\) when \\(y\\) can exceed \\(3\\).
 
 ## Mathematical formulation
 
-Consider linear constraints and variable bounds
-
-\\[
-\ell\le Ax\le u,
-\qquad L\le x\le U.
-\\]
+Use the [shared problem notation](../problem_formulation.md).
 
 For each nonzero coefficient in row \\(i\\), define the smallest and largest possible contributions of its variable:
 
@@ -85,42 +80,16 @@ A conflicting candidate can establish infeasibility. Equal finite updated bounds
 
 In exact arithmetic, the derived bounds hold for every original feasible point, and removed row sides are already implied by retained variable bounds. Consequently, these updates preserve feasible variable vectors, objective values, and optimal solutions. Tightening a variable alone does not justify deleting its source row.
 
-## Implementation overview
+## Numerical safeguards
 
-`Model::propagate_bounds` in `src/rules/bounds.rs` processes one round of rows from `changed_activities`. It skips non-linear row domains and rows with at most one coefficient; empty and singleton rows have separate rules.
+Activity contradictions are confirmed by direct recomputation before a certificate is returned. Contradictions use the configured feasibility margin; a smaller conflict rejects the candidate rather than storing an inconsistent interval. Redundant-side removal requires direct containment without a tolerance.
 
-For each row, the function obtains its activity range, checks for infeasibility, and removes redundant sides. It then visits the row's variables and calls `Activity::implied` in `src/model/activity.rs` to compute candidates from the other terms. The coefficient sign determines whether a candidate becomes a lower or upper variable bound.
+Unbounded residuals supply no finite candidate. Cancellation-sensitive residual calculations can be recomputed from the other terms. Nonfinite, excessively large, or insignificant updates can be skipped; these limits are described in [Settings](../settings.md#bound-propagation).
 
-`Model::implied_bound` checks each candidate and calls `tighten_bound` when appropriate. `Model::propagate_bounds` totals the successful updates and returns their count, which the scheduler uses when deciding whether further propagation rounds are useful.
+Tighter bounds can trigger more propagation or structural reductions, but work and time limits mean presolve need not reach a mathematical fixed point. See [Rule scheduling](../scheduling.md).
 
-Activity caches are updated as variable bounds change. Later variables in the same row can therefore benefit from earlier tightenings. A successful update also queues affected rows for reconsideration.
+## Recovery
 
-### Infinite contributions and cancellation
+Primal variable values are unchanged. During reverse recovery, multipliers associated with tightened bounds can move back to their source rows, with corresponding adjustments to bound multipliers to preserve stationarity. The source equations remain available even if later reductions remove the rows.
 
-Activity storage tracks finite sums separately from counts of nonfinite contributions. This allows a finite residual to be recovered when the excluded variable supplied the only unbounded contribution.
-
-The implementation first attempts to subtract the variable's contribution from the cached extreme. If cancellation makes that subtraction unreliable, it recomputes the residual directly from the other coefficients. If multiple unbounded contributions remain, no finite bound is derived from that extreme. A row-level shortcut skips candidate calculations when neither side can yield a finite residual.
-
-## Numerical checks
-
-Before returning a certificate for a row-activity contradiction, the function recomputes the activity directly and checks again. This avoids relying solely on a cached estimate affected by earlier arithmetic.
-
-Contradictions use `Model::separated`, with the configured feasibility tolerance \\(\varepsilon\\):
-
-\\[
-L>U+\varepsilon\bigl(1+\max(|L|,|U|)\bigr).
-\\]
-
-A proposed bound that conflicts with its opposite bound beyond this tolerance returns an infeasibility certificate. A smaller conflict rejects the candidate instead of storing an inconsistent interval. Redundant-side removal uses direct containment comparisons without a tolerance.
-
-Propagation calls `implied_bound` with `propagation = true`. It rejects nonfinite values and candidates whose absolute magnitude reaches `numerics.huge_bound`, then checks feasibility and whether the bound is tighter.
-
-For an already finite bound, an update that does not exactly meet the opposite bound must also exceed a minimum improvement. The threshold is the larger of `minimum_gain_factor * numerics.feasibility` and `minimum_relative_gain * abs(old_bound)`, using the propagation settings. This avoids repeated insignificant changes. An update that fixes the variable bypasses this gain threshold but still undergoes the preceding checks.
-
-## Scheduling and recovery
-
-`Model::propagate_rounds` in `src/rules/mod.rs` runs an initial propagation round and permits additional rounds under `propagation.additional_rounds`, a shared work allowance, and a deadline. Between extra rounds it runs cleanup and enabled substitution rules, allowing tighter bounds to trigger structural reductions. Propagation therefore need not continue to a mathematical fixed point.
-
-Each successful tightening saves a `Record::TightenedBound` with the old bound, affected variable side, and a snapshot of the row equation proving the update. Deleting a redundant row saves a `Record::DeletedRow`. Relaxing a redundant row side updates its bounds without adding a separate recovery record.
-
-Bound propagation alone does not remove primal variables, so their values need no reconstruction. During reverse dual recovery, tightened-bound records can transfer signed bound multipliers to the saved source rows, adjusting the other bound multipliers to preserve stationarity. The saved equations remain available even if later reductions change or remove the source rows.
+See [Settings](../settings.md) for rule switches and tuning, and [Rule scheduling](../scheduling.md) for ordering and stopping conditions.

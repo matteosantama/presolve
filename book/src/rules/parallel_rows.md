@@ -6,13 +6,13 @@ This rule changes constraint rows and their bounds. It does not change the objec
 
 ## Example
 
-Consider `x + 2y <= 5` and `2x + 4y <= 8`. Multiplying the second row by `1/2` gives `x + 2y <= 4`.
+Consider \\(x + 2y \le  5\\) and \\(2x + 4y \le  8\\). Multiplying the second row by \\(\tfrac12\\) gives \\(x + 2y \le  4\\).
 
-The two constraints are therefore equivalent to the tighter row `x + 2y <= 4`; the original upper bound of `5` is redundant.
+The two constraints are therefore equivalent to the tighter row \\(x + 2y \le  4\\); the original upper bound of \\(5\\) is redundant.
 
-A negative scale reverses the row sides. For example, `-2x - 4y >= -8` also becomes `x + 2y <= 4` after multiplication by `-1/2`.
+A negative scale reverses the row sides. For example, \\(-2x - 4y \ge  -8\\) also becomes \\(x + 2y \le  4\\) after multiplication by \\(-\tfrac12\\).
 
-Parallel rows need not merely duplicate an upper bound. Combining `x + 2y >= 4` with `2x + 4y <= 8` gives the equality `x + 2y = 4`. Replacing the first lower bound by `5` instead makes the pair infeasible in exact arithmetic.
+Parallel rows need not merely duplicate an upper bound. Combining \\(x + 2y \ge  4\\) with \\(2x + 4y \le  8\\) gives the equality \\(x + 2y = 4\\). Replacing the first lower bound by \\(5\\) instead makes the pair infeasible in exact arithmetic.
 
 ## Mathematical formulation
 
@@ -47,61 +47,22 @@ If the intersection is nonempty, row \\(r\\) can be removed and the base row rec
 
 For exactly proportional rows, this operation preserves all feasible variable vectors and objective values. Approximate coefficient matches require the numerical qualifications below.
 
-## Candidate discovery
-
-`Model::parallel_rows` in `src/rules/parallel.rs` considers linear rows containing at least two nonzero coefficients. Empty and singleton rows have separate rules.
-
-It computes fingerprints from the variable indices and normalized, quantized coefficients, then sorts candidates into matching groups. Fingerprints only select pairs for comparison; they do not establish proportionality. A collision group can contain several proportional classes, so unmatched members receive an additional canonical ordering and comparison pass instead of an all-pairs search.
-
-A fruitless scan is cached using the row revision. If the row state has not changed since that scan, the function returns without repeating it. Its return value counts pair comparisons, not successful row removals.
-
-## Proportionality check and merging
-
-`merge_parallel_rows` calls `proportional` to perform the authoritative comparison. The rows must be nonempty and have the same number of entries. The scale factor is the first base coefficient divided by the corresponding coefficient in the other row; it must be finite and nonzero.
-
-For each paired entry, the variable indices must match and the scaled coefficient must be finite. The coefficient comparison accepts
-
-\\[
-|a-\rho b|\le\tau\max(|a|,|\rho b|),
-\\]
-
-where \\(\tau\\) is `numerics.parallel`. The helper separately records whether every scaled coefficient equals its base coefficient exactly in floating-point arithmetic.
-
-After checking that both row domains are linear, the merge rescales the other row's bounds and computes the intersection. A finite source bound that becomes nonfinite during scaling rejects the merge. Infinite bounds representing missing restrictions are allowed.
-
-For an accepted intersection, stronger sides are applied through `Model::tighten_row`. The other row is cleared and a `Record::MergedRow` is saved. The base coefficients remain unchanged.
-
 ## Numerical safeguards
 
-If the intersection is empty, the implementation reports infeasibility only when both conditions hold:
-
-- The coefficient comparison was exact under the floating-point scaling check.
-- The gap exceeds the configured feasibility tolerance, scaled as below.
+Matching variable support alone is insufficient: coefficients must agree after scaling. The scale must be finite and nonzero. Each coefficient pair is checked using the parallel tolerance \\(\tau\\):
 
 \\[
-\ell_i^{\prime}-u_i^{\prime} > \varepsilon\bigl(1+\max(|\ell_i^{\prime}|,|u_i^{\prime}|)\bigr).
+|a-\rho b|\le\tau\max(|a|,|\rho b|).
 \\]
 
-Otherwise it rejects the merge without changing the rows. It does not store an inconsistent interval, even if the conflict is small.
+The comparison also distinguishes exact equality under floating-point scaling from tolerance-only agreement. A finite bound that overflows during rescaling rejects the merge.
 
-The implementation also rejects an approximate merge that would turn a previously non-equality base row into an equality. This guard does not forbid every approximate merge: a nonempty interval, or a base row already represented as an equality, can still pass the remaining checks.
+An empty intersection reports infeasibility only for an exact coefficient match and a gap exceeding the scaled feasibility margin. Otherwise the merge is rejected without changing the rows. A tolerance-only match cannot turn a previously non-equality retained row into an equality.
 
-Accepted approximate matches retain the base coefficients while dropping the other row. Consequently, exact feasible-set equivalence is guaranteed by the mathematical rule for truly proportional rows, not by coefficient agreement within tolerance alone. These safeguards limit particular numerical risks; they do not make approximately proportional rows identical.
+Accepted approximate merges keep the retained coefficients and discard the other row. Exact feasible-set equivalence requires truly proportional rows; tolerance-only agreement can leave a residual in the original problem. See [Settings](../settings.md#numerical-tolerances).
 
-### Infeasibility certificate
+## Recovery
 
-For an exact, sufficiently separated contradiction, the code chooses a sign \\(s\\) and returns row multipliers
+Primal values do not change. The removed row's multiplier starts at zero. If the retained row's multiplier uses a side tightened by the other row, that contribution transfers back to its source, scaled by \\(\rho\\). For exactly proportional rows, this preserves stationarity; approximate merges can leave a corresponding residual.
 
-\\[
-y_i=s,\qquad y_r=-\rho s,
-\\]
-
-with all other row multipliers and variable-bound multipliers zero at this stage. It uses \\(s=1\\) when the base lower bound exceeds the scaled upper bound; otherwise it uses \\(s=-1\\). The proportional coefficients cancel, leaving the contradiction in the bounds. Recovery maps the certificate through earlier reductions.
-
-## Postsolve recovery
-
-Primal variable values are unchanged by this rule. Successful tightening of a base side saves a `Record::TightenedRow`, identifying the source row, scale factor, and affected side. Removing the source saves a `Record::MergedRow` afterward.
-
-During reverse dual recovery, the removed row's multiplier is first initialized to zero. If the retained row's signed multiplier uses a tightened side, recovery transfers it to the source: it adds \\(\rho y_i\\) to \\(y_r\\) and sets \\(y_i\\) to zero. Otherwise the multiplier remains on the base row.
-
-For exactly proportional rows, this preserves the contribution to stationarity under the convention \\(Px+c=A^Ty+z\\). Approximate merges can leave a corresponding stationarity residual because the original coefficient rows are not exactly proportional.
+See [Settings](../settings.md) for rule switches and tuning, and [Rule scheduling](../scheduling.md) for ordering and stopping conditions.

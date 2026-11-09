@@ -6,13 +6,13 @@ The variable can still appear in the objective. Its bounds must also be preserve
 
 ## Equality example
 
-Suppose `x` appears only in the equality `2x + 3y = 10` and has no variable bounds. Solve for it:
+Suppose \\(x\\) appears only in the equality \\(2x + 3y = 10\\) and has no variable bounds. Solve for it:
 
 \\[
 x = 5 - \tfrac32 y.
 \\]
 
-For the objective `x + 2y`, substitution gives `5 + y/2`. The reduced problem removes `x` and this equality. After solving, postsolve restores `x` using the saved expression.
+For the objective \\(x + 2y\\), substitution gives \\(5 + \tfrac12y\\). The reduced problem removes \\(x\\) and this equality. After solving, postsolve restores \\(x\\) using the saved expression.
 
 ## Mathematical formulation
 
@@ -46,7 +46,7 @@ b-a_{ik}U_k \le r(x_R) \le b-a_{ik}L_k.
 
 For a negative pivot the lower and upper variable bounds exchange roles. If neither bound needs to survive, the row can be removed entirely.
 
-For example, substituting `x = 5 - y` with a necessary bound `x <= 4` leaves `y >= 1`.
+For example, substituting \\(x = 5 - y\\) with a necessary bound \\(x \le  4\\) leaves \\(y \ge  1\\).
 
 In exact arithmetic, equality substitution with all necessary bounds retained gives a one-to-one correspondence between original and reduced feasible points and preserves their objective values.
 
@@ -56,9 +56,9 @@ For an inequality, choosing a row boundary requires an optimality argument. The 
 
 For a minimization problem, the preferred row side is:
 
-- The lower side if `c_k / a_ik > 0`.
-- The upper side if `c_k / a_ik < 0`.
-- Either finite side if `c_k = 0`; the implementation prefers the lower side when finite.
+- The lower side if \\(c\_k/a\_{ik}>0\\).
+- The upper side if \\(c\_k/a\_{ik}<0\\).
+- Either finite side if \\(c\_k = 0\\); the implementation prefers the lower side when finite.
 
 The chosen side must be finite and reachable without violating the variable's bounds. Substitution then uses that side as an equality, retaining any necessary bound on the other side of the variable's interval.
 
@@ -74,30 +74,22 @@ Consider
 x+y\ge5,\qquad 0\le y\le3,
 \\]
 
-with `x` unbounded. For every fixed `y`, the smallest feasible `x` is `5 - y`. Substitution leaves the objective `5 + y`, so the reduced optimum is `y = 0`; postsolve recovers `x = 5`.
+with \\(x\\) unbounded. For every fixed \\(y\\), the smallest feasible \\(x\\) is \\(5 - y\\). Substitution leaves the objective \\(5 + y\\), so the reduced optimum is \\(y = 0\\); postsolve recovers \\(x = 5\\).
 
-If `1 <= x <= 4` instead, the lower bound does not block reaching `x = 5 - y` over the original interval for `y`. The upper bound becomes `y >= 1`. The reduced problem has `1 <= y <= 3`, giving `y = 1` and `x = 4`.
+If \\(1 \le  x \le  4\\) instead, the lower bound does not block reaching \\(x = 5 - y\\) over the original interval for \\(y\\). The upper bound becomes \\(y \ge  1\\). The reduced problem has \\(1 \le  y \le  3\\), giving \\(y = 1\\) and \\(x = 4\\).
 
 ### Boundary blocked by a bound
 
-If `x >= 3` and `0 <= y <= 3`, the boundary expression `x = 5 - y` gives `x = 2` at `y = 3`, violating the lower bound. The best feasible choice for a given `y` is now `max(3, 5 - y)`.
+If \\(x \ge  3\\) and \\(0 \le  y \le  3\\), the boundary expression \\(x = 5 - y\\) gives \\(x = 2\\) at \\(y = 3\\), violating the lower bound. The best feasible choice for a given \\(y\\) is now \\(\max(3,5-y)\\).
 
 The singleton-column rule skips this substitution. This does not prove infeasibility or prevent another presolve rule from simplifying the problem.
 
-## Implementation overview
+## Applicability and recovery
 
-`Model::singleton_columns` in `src/rules/substitution.rs` processes candidate columns. Changed bounds on neighboring variables also trigger reconsideration, because they can make a previously necessary bound implied by the row.
+For equalities, unnecessary variable bounds can be dropped while necessary bounds survive as a row on the remaining variables. Numerical stability and limits on added coefficients can prevent an otherwise valid elimination.
 
-For each candidate, the rule checks that the variable is still active, its column still has exactly one entry, its row is linear, and the row contains more than one variable. Singleton rows are handled by [singleton-row elimination](./singleton_rows.md).
+For inequalities, the chosen boundary must be reachable without violating the variable's bounds. Quadratic participation prevents this linear-cost boundary argument. A rejected substitution does not establish infeasibility.
 
-For an equality, it calls `singleton_range` to bound the value obtained by solving the row for the variable, using bounds on the other terms. `non_implied_bounds` identifies which original variable bounds still need to survive. The rule defers a variable with two necessary finite bounds to the doubleton rule. It also skips a quadratically coupled or curved variable when another coefficient in the row has larger magnitude than its pivot, avoiding amplification from a poorly scaled substitution.
+Postsolve restores the variable using the saved equation and reconstructs the corresponding row and bound multipliers.
 
-For an inequality, it rejects quadratic participation, selects the preferred finite side, and computes the same implied range. With a positive objective coefficient, the lower variable bound must be implied; with a negative coefficient, the upper variable bound must be implied. With a zero coefficient, both must be implied. These checks establish that the selected boundary is reachable wherever the retained restrictions hold.
-
-The rule calls `substitute` for equalities or `substitute_on_side` for inequalities. Both use `substitute_equation` in `src/model/mod.rs` to update the objective, remove the variable, and either retain a transformed row for necessary bounds or delete the row.
-
-## Numerical checks and recovery
-
-Substitution checks that its computed offset and slopes are finite. It also checks transformed finite row bounds and the objective update, enforcing the configured limits on added nonzero coefficients and Hessian growth. A rejected substitution leaves the variable available for other rules; rejection does not establish infeasibility.
-
-A successful substitution saves a `Record::Substituted` with the equation and recovery information. During ordinary primal recovery, postsolve restores the eliminated variable from the saved equation after recovering the remaining variables. The saved objective derivative and constraint information also support dual recovery.
+See [Settings](../settings.md) for rule switches and tuning, and [Rule scheduling](../scheduling.md) for ordering and stopping conditions.

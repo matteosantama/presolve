@@ -6,7 +6,7 @@ Proportional constraint columns alone are not sufficient. The implementation req
 
 ## Example
 
-Suppose every constraint uses `x` and `y` through `x + 2y`, the objective is `3x + 6y + w`, and their bounds are `1 <= x <= 4` and `0 <= y <= 3`.
+Suppose every constraint uses \\(x\\) and \\(y\\) through \\(x + 2y\\), the objective is \\(3x + 6y + w\\), and their bounds are \\(1 \le  x \le  4\\) and \\(0 \le  y \le  3\\).
 
 Introduce
 
@@ -14,19 +14,13 @@ Introduce
 z=x+2y,\qquad 1\le z\le10.
 \\]
 
-The row `x + 2y + w <= 12` becomes `z + w <= 12`, and the objective becomes `3z + w`. Two variables have become one.
+The row \\(x + 2y + w \le  12\\) becomes \\(z + w \le  12\\), and the objective becomes \\(3z + w\\). Two variables have become one.
 
-If the reduced solution has `z = 7`, one valid recovery is `x = 1`, `y = 3`. Recovery need not reproduce a particular original pair: several pairs can represent the same aggregate.
+If the reduced solution has \\(z = 7\\), one valid recovery is \\(x = 1\\), \\(y = 3\\). Recovery need not reproduce a particular original pair: several pairs can represent the same aggregate.
 
 ## Mathematical formulation
 
-Consider a symmetric quadratic objective and two-sided constraints:
-
-\\[
-\min_x\;\tfrac12x^TPx+c^Tx+c_0,
-\qquad \ell\le Ax\le u,
-\qquad L\le x\le U.
-\\]
+Use the [shared problem notation](../problem_formulation.md).
 
 For a nonzero scale \\(\rho\\), suppose
 
@@ -62,21 +56,9 @@ All other variable bounds are unchanged. For continuous variables, every value i
 
 In exact arithmetic, aggregation maps every original feasible point to a reduced feasible point with the same objective value, and every reduced feasible point admits such an original pair. This preserves the optimal value and permits recovery of optimal solutions, but the correspondence need not be one-to-one.
 
-## Candidate discovery and exact checks
-
-`Model::parallel_columns` in `src/rules/parallel.rs` considers active variables with nonempty constraint columns. Empty columns have a separate rule.
-
-It groups candidates using fingerprints of constraint columns. Within groups sharing a constraint fingerprint, it also fingerprints nonempty quadratic columns and sorts by the combined keys. Fingerprints only select candidates; the code subsequently checks each pair's actual coefficients.
-
-For a proposed pair retaining `j` and removing `k`, `proportional` computes the ratio from column `k` to column `j` and verifies matching row indices and scaled coefficients. Although the helper uses `numerics.parallel` to recognize a potential match, this rule then requires its exact flag: every scaled constraint coefficient must equal its counterpart in floating-point arithmetic.
-
-`Objective::parallel_curvature` in `src/model/objective.rs` checks quadratic columns with zero tolerance, including missing entries in either column. `Model::aggregate` additionally checks that the linear coefficients satisfy the same ratio with zero tolerance. A merely approximate constraint or quadratic match is skipped, unlike some accepted cases of [parallel-row elimination](./parallel_rows.md).
-
-Successful aggregation saves a `Record::ParallelColumns`, updates the retained interval, removes the other variable's constraint column and quadratic entries, and marks affected rows and columns for further processing. A fruitless scan is cached against the model revision. The function returns a comparison count, not a count of eliminated variables.
-
 ## Objective-dominance fallback
 
-After exact constraint and quadratic checks, if aggregation fails and the linear-cost difference is finite and nonzero, the code considers
+If the constraint and quadratic relations hold but linear costs differ, consider
 
 \\[
 \Delta=c_k-\rho c_j,
@@ -93,24 +75,18 @@ The code examines the variable endpoints in these improving directions:
 - If only the other variable's endpoint is infinite, it fixes the retained variable at its finite improving endpoint.
 - If both endpoints are finite, this fallback does not fix either variable.
 
-For example, with identical constraint columns, costs `2x + y`, and both variables nonnegative without upper bounds, transferring from `x` to `y` lowers the cost. Since `y` can increase indefinitely, the fallback can fix `x = 0` without changing the attainable optimum.
-
-When `dominated_columns` is enabled, the function also invokes a separate dominated-column pass on the discovered support groups. That broader rule is distinct from aggregation and the two-variable fallback described here.
+For example, with identical constraint columns, costs \\(2x + y\\), and both variables nonnegative without upper bounds, transferring from \\(x\\) to \\(y\\) lowers the cost. Since \\(y\\) can increase indefinitely, the fallback can fix \\(x = 0\\) without changing the attainable optimum.
 
 ## Numerical safeguards
 
-The scale must be finite and nonzero, and coefficient comparisons reject nonfinite scaled values. Quadratic and linear objective comparisons likewise require finite values.
+This rule requires exact floating-point scaled agreement for the constraint and quadratic columns, and compatible linear costs for aggregation. Tolerance-only matches are rejected. The scale and compared coefficients must be finite, and the scale nonzero.
 
-Aggregate bound calculations reject NaNs and a nonfinite endpoint produced from two finite contributing endpoints. Infinite endpoints representing absent restrictions are otherwise permitted. A failed aggregation leaves the pair unaggregated; the fallback above can still apply when its conditions hold.
+Aggregate bounds reject NaNs and overflow from finite endpoints. A failed aggregation does not establish infeasibility. Exact floating-point comparisons are not symbolic proofs; the equivalence argument assumes exact proportionality and arithmetic.
 
-The exactness checks are floating-point checks, not symbolic proofs of the real-number relations. They avoid accepting tolerance-only null directions, whose small constraint or quadratic discrepancies could become significant for large variable values. The mathematical equivalence statements assume exact proportionality and arithmetic.
+## Recovery
 
-## Postsolve recovery
+Postsolve splits the aggregate into a pair satisfying the saved original bound intervals and \\(z=x_j+\rho x_k\\). The split need not be unique. Signed variable-bound multipliers satisfy \\(z_k=\rho z_j\\) under the proportional gradient and constraint relations; here the subscripted quantities are multipliers, not the aggregate variable.
 
-`Record::ParallelColumns` saves the retained and removed indices, scale, and both original bound intervals. During ordinary primal recovery, the saved aggregate is split into a pair satisfying those intervals and \\(z=x_j+\rho x_k\\).
+A dominance-based fixing instead uses ordinary [fixed-variable recovery](./fixed_variables.md). A broader [dominated-column rule](./dominated_columns.md) can consider nonproportional columns when enabled.
 
-The implementation anchors the retained variable at its finite lower bound, otherwise its finite upper bound, otherwise zero. It computes \\(x_k=(z-\text{anchor})/\rho\\), clips that value to the removed variable's interval, then sets \\(x_j=z-\rho x_k\\). For a feasible aggregate, this gives a valid original pair in exact arithmetic.
-
-During dual recovery, the removed variable's signed bound multiplier is restored as \\(z_k=\rho z_j\\), where these \\(z_j,z_k\\) denote bound multipliers, not the aggregate variable. This is consistent with the proportional gradient and constraint columns under \\(Px+c=A^Ty+z\\). The recovery tape also handles recession directions and infeasibility multipliers through the aggregation.
-
-Fallback fixings use `Record::Fixed` and the ordinary [fixed-variable recovery](./fixed_variables.md) instead.
+See [Settings](../settings.md) for rule switches and tuning, and [Rule scheduling](../scheduling.md) for ordering and stopping conditions.
