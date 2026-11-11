@@ -11,6 +11,15 @@ the aggressive preset. Defaults include structural LP reductions and final row
 cleanup while retaining finite work budgets and no Hessian growth.
 Optional rules have independent switches.
 
+## Installation
+
+```sh
+cargo add presolve
+```
+
+Requires Rust 1.89 or newer. See the [API documentation](https://docs.rs/presolve)
+for usage and examples.
+
 ## Problem model and terminology
 
 The native problem is

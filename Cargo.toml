@@ -18,6 +18,12 @@ edition = "2024"
 rust-version = "1.89"
 description = "Sparse presolve and postsolve for convex quadratic and conic optimization"
 license = "Apache-2.0"
+repository = "https://github.com/matteosantama/presolve"
+documentation = "https://docs.rs/presolve"
+readme = "README.md"
+keywords = ["optimization", "presolve", "quadratic", "conic", "sparse"]
+categories = ["mathematics", "science"]
+include = ["src/**", "tests/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "NOTICE"]
 
 [dependencies]
 rayon = "1.12"
