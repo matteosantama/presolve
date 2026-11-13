@@ -18,3 +18,7 @@
 - [Parallel Rows](./rules/parallel_rows.md)
 - [Parallel Columns](./rules/parallel_columns.md)
 - [Dominated Columns](./rules/dominated_columns.md)
+- [Dual Fixing](./rules/dual_fixing.md)
+- [Dual Propagation](./rules/dual_propagation.md)
+- [Implied-Free Equalities](./rules/implied_free_equalities.md)
+- [Redundant Bounds](./rules/redundant_bounds.md)

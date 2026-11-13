@@ -86,9 +86,9 @@ The singleton-column rule skips this substitution. This does not prove infeasibi
 
 ## Applicability and recovery
 
-For equalities, unnecessary variable bounds can be dropped while necessary bounds survive as a row on the remaining variables. Numerical stability and limits on added coefficients can prevent an otherwise valid elimination.
+For equalities, unnecessary variable bounds can be dropped while necessary bounds survive as a row on the remaining variables. This singleton-column pass skips a candidate when both finite variable bounds remain necessary, deferring it to other substitution rules. If the variable participates in the quadratic objective, its pivot must also have the largest coefficient magnitude in the row. Numerical stability and limits on added coefficients can prevent an otherwise valid elimination.
 
-For inequalities, the chosen boundary must be reachable without violating the variable's bounds. Quadratic participation prevents this linear-cost boundary argument. A rejected substitution does not establish infeasibility.
+For inequalities, the chosen boundary must be reachable without violating the variable's bounds. With zero linear cost, the implementation requires both variable bounds to be implied by the selected boundary and the other variables' bounds; merely having a finite row side is insufficient. Quadratic participation prevents this linear-cost boundary argument. A rejected substitution does not establish infeasibility.
 
 Postsolve restores the variable using the saved equation and reconstructs the corresponding row and bound multipliers.
 

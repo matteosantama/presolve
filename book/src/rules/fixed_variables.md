@@ -7,16 +7,16 @@ Fixed-variable elimination substitutes a variable's known value into the objecti
 Consider
 
 \\[
-f(x,z)=x^2+3xz+2z^2+5z+10,
+f(x,z)=x^2+2xz+2z^2+5z+10,
 \\]
 
 with \\(z=7\\). Substitution gives
 
 \\[
-f(x,7)=x^2+21x+143.
+f(x,7)=x^2+14x+143.
 \\]
 
-The cross term becomes \\(21x\\), while the terms involving only \\(z\\), together with the original constant, contribute \\(143\\). Likewise, the constraint becomes
+The cross term becomes \\(14x\\), while the terms involving only \\(z\\), together with the original constant, contribute \\(143\\). Likewise, the constraint becomes
 
 \\[
 x+z\le10 \quad\Longrightarrow\quad x\le3.

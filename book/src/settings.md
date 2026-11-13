@@ -41,6 +41,9 @@ The documented rules use these fields within `settings.rules`:
 | Doubleton / short equalities | `doubleton_equalities` / `short_equalities` |
 | Parallel rows / columns | `parallel_rows` / `parallel_columns` |
 | Dominated columns | `dominated_columns` |
+| Dual fixing / propagation | `dual_fixing` / `dual_propagation` |
+| Implied-free equalities | `implied_free_equalities` |
+| Redundant-bound removal | `redundant_bounds` |
 
 ## Time, progress, and threads
 
@@ -85,17 +88,17 @@ The `equalities` settings control short-equality candidates and are also used by
 | --- | --- | --- |
 | `max_row_length` | `8` | Maximum short-equality length; this rule starts at three entries. |
 | `min_column_length`, `max_column_length` | `2`, `8` | Eligible candidate column lengths. |
-| `require_free_variable` | `true` | Require no finite variable bounds. |
+| `require_free_variable` | `true` | Require no finite variable bounds for short-equality candidates; ignored by implied-free elimination. |
 | `require_linear_variable` | `true` | Exclude quadratic participation, including cross terms. |
 | `relative_pivot` | `1.0` | Minimum pivot magnitude divided by the row's maximum coefficient magnitude. |
-| `max_pivot_attempts` | `1` | Maximum retained candidates per row per pass; zero disables attempts. |
-| `cost_aware` | `false` | Prefer shorter columns; enabling it ranks by estimated constraint and quadratic work after preferring free variables. |
+| `max_pivot_attempts` | `1` | Maximum retained candidates per visit to an equality; zero disables attempts. |
+| `cost_aware` | `false` | Rank by column length, or by estimated constraint and quadratic work when enabled. Short-equality elimination first prefers free variables; implied-free elimination has no such preference. |
 | `preserve_nonzeros` | `true` | Further cap fill by the number of coefficients removed. |
 | `work_limit` | `WorkLimit::Default` | Twice current constraint nonzeros for a short-equality pass; sixteen times for the implied-free aggregation pass. |
 
-`relative_pivot` outside `(0, 1]` falls back to `1.0`. The default avoids slopes larger than one in magnitude; smaller ratios permit amplification. Bounded candidates retain necessary bounds as constraints. Implied-free equality elimination treats candidates of column length at most two specially: its row and column length caps apply only to longer columns.
+`relative_pivot` outside `(0, 1]` falls back to `1.0`. The default avoids slopes larger than one in magnitude; smaller ratios permit amplification. Short-equality substitution retains necessary variable bounds as constraints. Implied-free elimination instead requires all explicit bounds to follow from the defining equality and the other variables' bounds, independently of `require_free_variable`. Its row and column length caps apply only to candidates with more than two column entries. Affected equalities can be revisited during the same implied-free pass.
 
-More candidate attempts or a larger work allowance do not bypass fill or numerical checks. Equality statistics distinguish structural, pivot, work, numerical, constraint-fill, quadratic-fill, Hessian-growth, and deadline rejections.
+More candidate attempts or a larger work allowance do not bypass fill or numerical checks. Short-equality statistics distinguish structural, pivot, work, numerical, constraint-fill, quadratic-fill, Hessian-growth, and deadline rejections; these detailed counters do not cover implied-free elimination.
 
 ## Bound propagation
 

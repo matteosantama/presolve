@@ -71,7 +71,7 @@ In exact arithmetic, the reduced and original problems have the same feasible va
 
 ## Numerical tolerance and recovery
 
-A conflicting implied bound establishes infeasibility only when the gap exceeds the configured feasibility margin. Nonfinite candidates are not applied. The row is removed only when the stored variable bounds actually contain its restriction, using direct comparisons rather than tolerance alone.
+A conflicting implied bound establishes infeasibility only when the gap exceeds the configured feasibility margin. Nonfinite candidates are not applied. The row is removed only when the stored variable interval is contained in the interval implied by the row, using direct comparisons rather than tolerance alone.
 
 Primal values do not change. During dual recovery, a bound multiplier attributable to a transferred row restriction can move back to that row. For coefficient \\(a_{ik}\\), transferring \\(z_k\\) contributes \\(z_k/a_{ik}\\) to the row multiplier, preserving stationarity in exact arithmetic.
 
